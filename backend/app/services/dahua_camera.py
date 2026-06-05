@@ -337,17 +337,33 @@ def resolve_dahua_source(source: str | None) -> str | None:
         return lan_url
 
     if mode in ("p2p", "auto"):
+        lan_host = str(cfg.get("host") or "").strip()
+        if lan_host:
+            lan_url = build_rtsp_url(
+                host=lan_host,
+                username=username,
+                password=password,
+                rtsp_port=int(cfg.get("rtsp_port") or 554),
+                stream=stream,
+            )
+            # Auto: same-site Wi-Fi — try LAN before slow P2P.
+            if mode == "auto":
+                quick = probe_stream(lan_url, timeout_sec=6.0)
+                if quick.get("ok"):
+                    _log.info("Using LAN RTSP at %s (auto).", lan_host)
+                    return lan_url
+                _log.warning("LAN RTSP probe failed for %s: %s", lan_host, quick.get("error"))
+
         cloud_url = _try_cloud_tunnel_rtsp(
             cfg,
             username=username,
             password=password,
             stream=stream,
-            wait_sec=90.0 if mode == "p2p" else 40.0,
+            wait_sec=25.0 if mode == "p2p" else 15.0,
         )
         if cloud_url:
             return cloud_url
         _log.warning("Dahua cloud tunnel not ready")
-        lan_host = str(cfg.get("host") or "").strip()
         if lan_host:
             _log.info("Using LAN RTSP at %s (cloud tunnel unavailable).", lan_host)
             return build_rtsp_url(
@@ -357,8 +373,6 @@ def resolve_dahua_source(source: str | None) -> str | None:
                 rtsp_port=int(cfg.get("rtsp_port") or 554),
                 stream=stream,
             )
-        if mode == "auto":
-            return None
         return None
 
     return build_rtsp_url(
