@@ -265,7 +265,7 @@ export const SettingsErrorLog: React.FC = () => {
                 {Object.entries(stats.by_category || {}).map(([k, v]) => (
                   <div key={k} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '4px 0' }}>
                     <span>{CAT_LABELS[k] || k}</span>
-                    <strong>{v}</strong>
+                    <strong>{Number(v)}</strong>
                   </div>
                 ))}
                 {!Object.keys(stats.by_category || {}).length && (
@@ -277,7 +277,7 @@ export const SettingsErrorLog: React.FC = () => {
                 {Object.entries(stats.by_severity || {}).map(([k, v]) => (
                   <div key={k} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '4px 0' }}>
                     <SeverityBadge severity={k} />
-                    <strong>{v}</strong>
+                    <strong>{Number(v)}</strong>
                   </div>
                 ))}
               </div>
@@ -417,7 +417,7 @@ export const SettingsErrorLog: React.FC = () => {
                             {row.source}
                             {row.job_id && ` · job ${row.job_id.slice(0, 8)}…`}
                             {row.plate && ` · ${row.plate}`}
-                            {row.last_seen_at && ` · ${fmtQatar(row.last_seen_at)}`}
+                            {row.last_seen_at && ` · ${fmtQatar(row.last_seen_at, 'dmyHm')}`}
                           </div>
                         </div>
                         {open ? <ChevronUp size={18} /> : <ChevronDown size={18} />}

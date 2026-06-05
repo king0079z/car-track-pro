@@ -319,8 +319,8 @@ export type DahuaHeroA1Public = {
     relay?: Record<string, unknown>;
   };
   cloud?: {
-    online?: boolean;
-    randsalt?: boolean;
+    online?: boolean | null;
+    randsalt?: boolean | null;
     deps_ok?: boolean;
     tunnel?: Record<string, unknown>;
   };
