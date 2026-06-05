@@ -32,20 +32,24 @@ Write-Host "Starting Cloudflare quick tunnel to port $Port ..." -ForegroundColor
 Write-Host "Copy the https://....trycloudflare.com URL when it appears." -ForegroundColor Yellow
 Write-Host ""
 
-$log = Join-Path $env:TEMP "cartrack-cloudflared.log"
-Remove-Item $log -ErrorAction SilentlyContinue
-$proc = Start-Process -FilePath $cf -ArgumentList "tunnel", "--url", "http://127.0.0.1:$Port" -RedirectStandardOutput $log -RedirectStandardError $log -PassThru -NoNewWindow
+$logOut = Join-Path $env:TEMP "cartrack-cloudflared-out.log"
+$logErr = Join-Path $env:TEMP "cartrack-cloudflared-err.log"
+Remove-Item $logOut, $logErr -ErrorAction SilentlyContinue
+$proc = Start-Process -FilePath $cf -ArgumentList "tunnel", "--url", "http://127.0.0.1:$Port" -RedirectStandardOutput $logOut -RedirectStandardError $logErr -PassThru -NoNewWindow
 
 $deadline = (Get-Date).AddSeconds(50)
 $url = $null
 while ((Get-Date) -lt $deadline) {
     Start-Sleep -Seconds 2
-    if (Test-Path $log) {
-        $text = Get-Content $log -Raw -ErrorAction SilentlyContinue
-        if ($text -match "(https://[a-z0-9-]+\.trycloudflare\.com)") {
-            $url = $Matches[1]
-            break
+    $text = ""
+    foreach ($log in @($logOut, $logErr)) {
+        if (Test-Path $log) {
+            $text += Get-Content $log -Raw -ErrorAction SilentlyContinue
         }
+    }
+    if ($text -match "(https://[a-z0-9-]+\.trycloudflare\.com)") {
+        $url = $Matches[1]
+        break
     }
 }
 
@@ -53,9 +57,11 @@ if ($url) {
     $url | Set-Content -Path $OutFile -Encoding ASCII -NoNewline
     Write-Host ""
     Write-Host "Tunnel URL: $url" -ForegroundColor Green
-    Write-Host "Saved to $OutFile — use as VITE_API_URL on Vercel." -ForegroundColor Green
+    Write-Host "Saved to $OutFile - use as VITE_API_URL on Vercel." -ForegroundColor Green
     Write-Host "Leave cloudflared running (PID $($proc.Id)). Press Ctrl+C in that process to stop."
 } else {
-    Write-Host "Could not read tunnel URL from log. Open $log or run cloudflared manually." -ForegroundColor Yellow
-    if (Test-Path $log) { Get-Content $log -Tail 20 }
+    Write-Host "Could not read tunnel URL from log. Check $logOut and $logErr or run cloudflared manually." -ForegroundColor Yellow
+    foreach ($log in @($logOut, $logErr)) {
+        if (Test-Path $log) { Get-Content $log -Tail 10 }
+    }
 }
