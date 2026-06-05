@@ -1,0 +1,19 @@
+{
+  "dahua_hero_a1": {
+    "enabled": false,
+    "host": "192.168.1.178",
+    "rtsp_port": 554,
+    "http_port": 80,
+    "username": "admin",
+    "password": "",
+    "stream": "sub",
+    "label": "DH-H3A",
+    "use_tcp_transport": true,
+    "connection_mode": "auto",
+    "p2p_local_port": 18554,
+    "device_serial": "",
+    "device_type": "DH-H3A",
+    "security_code": "",
+    "p2p_randsalt": ""
+  }
+}

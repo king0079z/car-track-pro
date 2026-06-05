@@ -1,0 +1,14 @@
+venv
+__pycache__
+*.pyc
+.pytest_cache
+.env
+.env.*
+*.db
+uploads/*
+!uploads/.gitkeep
+.git
+*.md
+scripts
+vendor/dh_p2p/p2p_*.log
+vendor/dh_p2p/p2p_*.txt

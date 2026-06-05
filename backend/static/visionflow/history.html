@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>VisionFlow · Analysis history</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,600;0,9..40,700&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/app.css" />
+  <style>
+    * { box-sizing: border-box; }
+    .top {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 22px;
+    }
+    h1 {
+      margin: 0;
+      font-family: var(--font-display), Georgia, serif;
+      font-weight: 400;
+      font-size: clamp(1.85rem, 4vw, 2.6rem);
+      letter-spacing: -0.02em;
+    }
+    h1 em { font-style: italic; color: var(--accent); }
+    .history-shell {
+      margin-bottom: 22px;
+    }
+    .hint { margin: 0 0 14px; color: var(--muted); font-size: 0.95rem; line-height: 1.5; max-width: 70ch; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.86rem;
+    }
+    th {
+      text-align: left;
+      padding: 12px 14px;
+      background: rgba(8, 10, 18, 0.9);
+      color: rgba(210, 214, 240, 0.75);
+      font-weight: 600;
+      font-size: 0.68rem;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    }
+    td {
+      padding: 12px 14px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+      vertical-align: top;
+    }
+    tr:hover td { background: rgba(94, 234, 212, 0.06); }
+    .mono { font-variant-numeric: tabular-nums; }
+    .badge {
+      display: inline-block;
+      padding: 3px 8px;
+      border-radius: 999px;
+      font-size: 0.68rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .b-done { background: rgba(52, 211, 153, 0.12); color: var(--success); border: 1px solid rgba(52, 211, 153, 0.25); }
+    .b-err { background: rgba(251, 113, 133, 0.12); color: var(--danger); border: 1px solid rgba(251, 113, 133, 0.28); }
+    .b-run { background: rgba(94, 234, 212, 0.12); color: var(--accent); border: 1px solid rgba(94, 234, 212, 0.3); }
+    .b-q { background: rgba(255, 255, 255, 0.06); color: var(--muted); border: 1px solid rgba(255, 255, 255, 0.1); }
+    .actions { display: flex; flex-wrap: wrap; gap: 8px; }
+    .actions a, .actions button {
+      font-family: inherit;
+      font-size: 0.78rem;
+      font-weight: 600;
+      padding: 6px 12px;
+      border-radius: 10px;
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      background: rgba(255, 255, 255, 0.06);
+      color: var(--accent);
+      cursor: pointer;
+      text-decoration: none;
+    }
+    .actions a:hover, .actions button:hover { background: rgba(94, 234, 212, 0.1); }
+    #listMount { padding: 8px 0 4px; }
+    .detail-wrap { margin-top: 22px; padding: 18px 18px 22px; border-top: 1px solid rgba(255, 255, 255, 0.08); display: none; }
+    .detail-wrap.open { display: block; }
+    .detail-wrap h3 { margin: 0 0 12px; font-size: 1rem; }
+    .subtable { width: 100%; font-size: 0.8rem; margin-top: 8px; }
+    .subtable th { font-size: 0.62rem; }
+    .empty { padding: 28px; text-align: center; color: var(--muted); }
+  </style>
+</head>
+<body>
+  <div class="app-noise" aria-hidden="true"></div>
+  <div class="app-frame">
+    <header class="app-topbar">
+      <a href="/analyzer/" class="brand" aria-label="VisionFlow home">
+        <div class="brand-mark" aria-hidden="true">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
+            <path d="M12 2L3 7v10l9 5 9-5V7l-9-5z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>
+            <path d="M12 12l9-5M12 12v10M12 12L3 7" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+          </svg>
+        </div>
+        <div class="brand-text">
+          <strong>VisionFlow</strong>
+          <span>History</span>
+        </div>
+      </a>
+      <nav class="topbar-actions">
+        <a class="pill-link" href="/analyzer/">← Analyzer</a>
+      </nav>
+    </header>
+
+    <div class="top history-shell">
+      <div>
+        <h1>Analysis <em>history</em></h1>
+        <p class="hint">Stored on this machine in <span class="mono">analysis_history.db</span> plus your <span class="mono">outputs/</span> folder. Refresh-safe.</p>
+      </div>
+    </div>
+
+    <section class="surface-card">
+      <div class="surface-inner" style="padding: 0;">
+      <div id="listMount" style="overflow-x: auto;">
+        <div class="empty" id="loading">Loading…</div>
+      </div>
+      <div class="detail-wrap" id="detailPanel">
+        <h3 id="detailTitle">Job detail</h3>
+        <p class="hint" id="detailMeta"></p>
+        <div style="overflow-x: auto;">
+          <table class="subtable" id="detailTable">
+            <thead>
+              <tr>
+                <th>Trk</th><th>Plate</th><th>Peak</th><th>Last</th><th>Enter</th><th>Exit</th><th>Dwell</th><th>State</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    function esc(s) {
+      return String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+    }
+    function fmtClock(sec) {
+      if (sec == null || Number.isNaN(+sec)) return "—";
+      const t = Math.max(0, +sec);
+      const mm = Math.floor(t / 60);
+      const ss = (t % 60).toFixed(2).padStart(5, "0");
+      return mm + ":" + ss;
+    }
+    function badge(status) {
+      if (status === "done") return '<span class="badge b-done">Done</span>';
+      if (status === "error") return '<span class="badge b-err">Error</span>';
+      if (status === "running") return '<span class="badge b-run">Running</span>';
+      return '<span class="badge b-q">' + esc(status) + "</span>";
+    }
+
+    let selectedId = null;
+
+    async function loadList() {
+      const mount = document.getElementById("listMount");
+      try {
+        const r = await fetch("/vf/api/history?limit=150");
+        const data = await r.json();
+        const items = data.items || [];
+        if (!items.length) {
+          mount.innerHTML = '<div class="empty">No analyses yet. Run one from the home page.</div>';
+          return;
+        }
+        mount.innerHTML =
+          "<table><thead><tr><th>When</th><th>File</th><th>Status</th><th>Vehicles</th><th>Plates</th><th></th></tr></thead><tbody>" +
+          items
+            .map((it) => {
+              const vid = esc(it.job_id);
+              return (
+                "<tr data-id=\"" +
+                vid +
+                "\">" +
+                "<td class=\"mono\">" +
+                esc(it.updated_at || it.created_at || "") +
+                "</td>" +
+                "<td>" +
+                esc(it.input_name || "") +
+                "</td>" +
+                "<td>" +
+                badge(it.status) +
+                "</td>" +
+                "<td class=\"mono\">" +
+                esc(it.vehicle_count ?? 0) +
+                "</td>" +
+                "<td style=\"max-width:220px;font-size:0.78rem;color:rgba(210,214,240,0.75)\">" +
+                esc(it.plates_preview || "—") +
+                "</td>" +
+                "<td class=\"actions\">" +
+                (it.has_video && it.status === "done"
+                  ? "<a href=\"/vf/api/jobs/" + vid + "/video\">Download</a>"
+                  : "") +
+                "<button type=\"button\" class=\"btn-detail\">Details</button>" +
+                "</td></tr>"
+              );
+            })
+            .join("") +
+          "</tbody></table>";
+
+        mount.querySelectorAll("tr[data-id]").forEach((tr) => {
+          tr.querySelector(".btn-detail").addEventListener("click", () => openDetail(tr.getAttribute("data-id")));
+        });
+      } catch (e) {
+        mount.innerHTML = '<div class="empty">Could not load history.</div>';
+      }
+    }
+
+    async function openDetail(jobId) {
+      selectedId = jobId;
+      const panel = document.getElementById("detailPanel");
+      const title = document.getElementById("detailTitle");
+      const meta = document.getElementById("detailMeta");
+      const tb = document.querySelector("#detailTable tbody");
+      panel.classList.add("open");
+      title.textContent = "Job " + jobId.slice(0, 12) + "…";
+      meta.textContent = "Loading…";
+      tb.innerHTML = "";
+      try {
+        const r = await fetch("/vf/api/jobs/" + encodeURIComponent(jobId));
+        if (!r.ok) throw new Error("not found");
+        const d = await r.json();
+        meta.textContent =
+          (d.input_name || "") +
+          " · " +
+          (d.status || "") +
+          (d.message ? " · " + d.message : "");
+        const rows = d.vehicles || [];
+        if (!rows.length) {
+          tb.innerHTML = '<tr><td colspan="8" style="color: var(--muted);">No vehicle rows stored for this job.</td></tr>';
+          return;
+        }
+        tb.innerHTML = rows
+          .map((v) => {
+            return (
+              "<tr><td class=\"mono\">" +
+              esc(v.track_id) +
+              "</td><td>" +
+              esc(v.plate) +
+              "</td><td class=\"mono\">" +
+              esc(v.speed_kmh_max ?? "—") +
+              "</td><td class=\"mono\">" +
+              esc(v.speed_kmh_last ?? "—") +
+              "</td><td class=\"mono\">" +
+              fmtClock(v.t_enter_sec) +
+              "</td><td class=\"mono\">" +
+              fmtClock(v.t_exit_sec) +
+              "</td><td class=\"mono\">" +
+              (v.duration_sec != null ? esc(v.duration_sec.toFixed(2)) + "s" : "—") +
+              "</td><td>" +
+              esc(v.status || "") +
+              "</td></tr>"
+            );
+          })
+          .join("");
+      } catch (_) {
+        meta.textContent = "Could not load job detail.";
+      }
+    }
+
+    loadList();
+  </script>
+</body>
+</html>

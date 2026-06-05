@@ -1,0 +1,17 @@
+# Example dataset layout for fine-tuning YOLO26 on license plates.
+#
+#   datasets/plates/
+#     images/train/   *.jpg
+#     images/val/     *.jpg
+#     labels/train/   *.txt   (YOLO format: class cx cy w h — normalized 0–1)
+#     labels/val/     *.txt
+#
+# Label only the plate bounding box (single class: plate).
+# For angled plates, use yolo26s-obb.pt and OBB label format instead.
+
+path: ../datasets/plates
+train: images/train
+val: images/val
+
+names:
+  0: plate

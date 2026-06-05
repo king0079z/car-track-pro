@@ -1,0 +1,927 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>CarTrack Pro — AI System Proposal 2026</title>
+<style>
+/* ── Reset ──────────────────────────────────────────── */
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:#f8fafc;color:#1e293b;line-height:1.65;font-size:14px}
+
+/* ── Print button (screen only) ─────────────────────── */
+#print-btn{
+  position:fixed;top:20px;right:20px;z-index:9999;
+  background:linear-gradient(135deg,#2563eb,#1d4ed8);
+  color:#fff;border:none;padding:11px 22px;border-radius:8px;
+  font-size:13px;font-weight:600;cursor:pointer;
+  display:flex;align-items:center;gap:8px;
+  box-shadow:0 4px 14px rgba(37,99,235,0.4);
+  transition:all 0.2s;
+}
+#print-btn:hover{transform:translateY(-1px);box-shadow:0 6px 20px rgba(37,99,235,0.5)}
+#print-btn svg{width:16px;height:16px}
+
+/* ── Page / sections ─────────────────────────────────── */
+.page{max-width:960px;margin:0 auto;padding:0 0 60px}
+
+/* ── HERO ─────────────────────────────────────────────── */
+.hero{
+  background:linear-gradient(160deg,#0f172a 0%,#1e293b 60%,#0f2d4a 100%);
+  color:#fff;padding:64px 60px 56px;position:relative;overflow:hidden;
+}
+.hero::before{
+  content:'';position:absolute;top:0;right:0;width:420px;height:100%;
+  background:linear-gradient(135deg,rgba(37,99,235,0.15) 0%,transparent 70%);
+  pointer-events:none;
+}
+.hero::after{
+  content:'';position:absolute;bottom:-2px;left:0;right:0;height:4px;
+  background:linear-gradient(90deg,#2563eb,#7c3aed,#06b6d4,#10b981);
+}
+.hero-badge{
+  display:inline-flex;align-items:center;gap:8px;
+  background:rgba(37,99,235,0.2);border:1px solid rgba(37,99,235,0.4);
+  color:#93c5fd;border-radius:20px;padding:5px 14px;font-size:11px;font-weight:600;
+  letter-spacing:0.08em;text-transform:uppercase;margin-bottom:20px;
+}
+.hero-badge .dot{width:6px;height:6px;border-radius:50%;background:#3b82f6;animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}
+.hero h1{font-size:44px;font-weight:800;letter-spacing:-1px;line-height:1.1;margin-bottom:8px}
+.hero h1 span{color:#60a5fa}
+.hero .tagline{font-size:17px;color:#94a3b8;font-weight:400;margin-bottom:36px;max-width:560px}
+.hero-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:36px}
+.hero-stat{
+  background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1);
+  border-radius:12px;padding:18px 20px;
+}
+.hero-stat .val{font-size:30px;font-weight:800;color:#fff}
+.hero-stat .val span{font-size:14px;font-weight:400;color:#64748b}
+.hero-stat .lbl{font-size:11px;color:#64748b;font-weight:500;text-transform:uppercase;letter-spacing:0.06em;margin-top:4px}
+.hero-meta{display:flex;gap:24px;flex-wrap:wrap}
+.hero-meta-item{font-size:12px;color:#64748b;display:flex;align-items:center;gap:6px}
+.hero-meta-item strong{color:#94a3b8}
+
+/* ── Section wrapper ─────────────────────────────────── */
+.section{padding:52px 60px 0}
+.section-header{display:flex;align-items:flex-start;gap:14px;margin-bottom:28px}
+.section-icon{
+  width:40px;height:40px;border-radius:10px;display:flex;align-items:center;justify-content:center;
+  font-size:18px;flex-shrink:0;margin-top:2px;
+}
+.section-title h2{font-size:22px;font-weight:700;color:#0f172a;line-height:1.2}
+.section-title p{font-size:13px;color:#64748b;margin-top:4px}
+
+/* ── Divider ─────────────────────────────────────────── */
+.divider{height:1px;background:linear-gradient(90deg,transparent,#e2e8f0,transparent);margin:0 60px}
+
+/* ── Callout ─────────────────────────────────────────── */
+.callout{
+  border-radius:12px;padding:16px 20px;font-size:13px;line-height:1.6;
+  display:flex;gap:14px;align-items:flex-start;margin-top:20px;
+}
+.callout.blue{background:#eff6ff;border-left:4px solid #2563eb;color:#1e3a5f}
+.callout.green{background:#f0fdf4;border-left:4px solid #10b981;color:#064e3b}
+.callout.amber{background:#fffbeb;border-left:4px solid #f59e0b;color:#451a03}
+.callout-icon{font-size:18px;flex-shrink:0;margin-top:1px}
+
+/* ── Two column ─────────────────────────────────────── */
+.two-col{display:grid;grid-template-columns:1fr 1fr;gap:28px}
+.three-col{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+.four-col{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}
+
+/* ── Feature card ─────────────────────────────────────── */
+.feat-card{
+  border-radius:12px;padding:18px 20px;border:1px solid;
+  transition:transform 0.15s;
+}
+.feat-card.blue  {background:#eff6ff;border-color:#bfdbfe}
+.feat-card.green {background:#f0fdf4;border-color:#bbf7d0}
+.feat-card.purple{background:#f5f3ff;border-color:#ddd6fe}
+.feat-card.orange{background:#fffbeb;border-color:#fde68a}
+.feat-card.teal  {background:#f0fdfa;border-color:#99f6e4}
+.feat-card.rose  {background:#fff1f2;border-color:#fecdd3}
+.feat-card .fc-cat{font-size:10px;font-weight:800;letter-spacing:0.1em;text-transform:uppercase;margin-bottom:7px}
+.feat-card.blue   .fc-cat{color:#2563eb}
+.feat-card.green  .fc-cat{color:#059669}
+.feat-card.purple .fc-cat{color:#7c3aed}
+.feat-card.orange .fc-cat{color:#d97706}
+.feat-card.teal   .fc-cat{color:#0d9488}
+.feat-card.rose   .fc-cat{color:#e11d48}
+.feat-card h4{font-size:14px;font-weight:700;color:#0f172a;margin-bottom:6px}
+.feat-card p{font-size:12.5px;color:#475569;line-height:1.55}
+
+/* ── Screen row ─────────────────────────────────────── */
+.screen-row{
+  display:flex;gap:32px;align-items:flex-start;
+  padding:36px 60px;border-bottom:1px solid #f1f5f9;
+}
+.screen-row.alt{flex-direction:row-reverse;background:#fafbfd}
+.screen-row .img-wrap{flex:0 0 54%;position:relative}
+.screen-row img{width:100%;border-radius:12px;border:1px solid #cbd5e1;display:block}
+.screen-row .img-badge{
+  position:absolute;top:10px;left:10px;background:rgba(15,23,42,0.85);
+  backdrop-filter:blur(8px);color:#fff;font-size:10px;font-weight:700;
+  padding:4px 10px;border-radius:20px;letter-spacing:0.06em;text-transform:uppercase;
+}
+.screen-row .desc{flex:1;padding-top:4px}
+.seq-num{
+  display:inline-flex;align-items:center;justify-content:center;
+  width:26px;height:26px;border-radius:7px;font-size:12px;font-weight:800;
+  color:#fff;margin-bottom:10px;
+}
+.screen-tag{font-size:10.5px;font-weight:700;letter-spacing:0.09em;text-transform:uppercase;margin-bottom:6px}
+.screen-title{font-size:19px;font-weight:800;color:#0f172a;margin-bottom:16px;line-height:1.25}
+.feature-list{list-style:none;display:flex;flex-direction:column;gap:9px}
+.feature-list li{display:flex;gap:10px;align-items:flex-start;font-size:12.5px;color:#374151;line-height:1.55}
+.feature-list li .bullet{
+  width:6px;height:6px;border-radius:50%;margin-top:6px;flex-shrink:0;
+}
+
+/* ── UI Comparison section ──────────────────────────── */
+.ui-compare{padding:36px 60px;background:linear-gradient(180deg,#f8fafc,#fff)}
+.compare-grid{display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-top:24px}
+.compare-card{border-radius:14px;overflow:hidden;border:1px solid #e2e8f0}
+.compare-label{
+  padding:12px 18px;font-size:11.5px;font-weight:700;letter-spacing:0.05em;
+  text-transform:uppercase;display:flex;align-items:center;gap:8px;
+}
+.compare-label.dark-lbl{background:#0f172a;color:#94a3b8}
+.compare-label.light-lbl{background:#f8fafc;color:#64748b;border-bottom:1px solid #e2e8f0}
+.compare-label .mode-dot{width:8px;height:8px;border-radius:50%}
+.compare-label.dark-lbl .mode-dot{background:#3b82f6}
+.compare-label.light-lbl .mode-dot{background:#22c55e}
+.compare-card img{width:100%;display:block}
+.compare-desc{padding:14px 18px;font-size:12px;color:#64748b;line-height:1.55;background:#fff;border-top:1px solid #f1f5f9}
+
+/* ── Tables ─────────────────────────────────────────── */
+.tbl-wrap{border-radius:12px;overflow:hidden;border:1px solid #e2e8f0;margin-top:4px}
+table{width:100%;border-collapse:collapse;font-size:12.5px}
+thead th{
+  text-align:left;padding:11px 16px;
+  font-weight:700;font-size:10.5px;text-transform:uppercase;letter-spacing:0.06em;
+  color:#fff;
+}
+.th-blue thead th{background:#2563eb}
+.th-green thead th{background:#059669}
+.th-purple thead th{background:#7c3aed}
+.th-teal thead th{background:#0d9488}
+.th-slate thead th{background:#475569}
+tbody td{padding:10px 16px;color:#374151;border-bottom:1px solid #f1f5f9;vertical-align:top}
+tbody tr:last-child td{border-bottom:none}
+tbody tr:nth-child(even) td{background:#fafbfc}
+td strong{color:#0f172a;font-weight:600}
+.tag{
+  display:inline-block;padding:2px 8px;border-radius:4px;font-size:10.5px;
+  font-weight:600;text-transform:uppercase;letter-spacing:0.05em;
+}
+.tag.rec{background:#dcfce7;color:#166534}
+.tag.min{background:#f1f5f9;color:#475569}
+
+/* ── Step flow ──────────────────────────────────────── */
+.steps{display:flex;flex-direction:column;gap:10px}
+.step{display:flex;gap:14px;align-items:flex-start}
+.step-num{
+  width:26px;height:26px;border-radius:7px;font-size:11px;font-weight:800;
+  display:flex;align-items:center;justify-content:center;flex-shrink:0;color:#fff;
+  background:linear-gradient(135deg,#2563eb,#7c3aed);
+}
+.step p{font-size:12.5px;color:#374151;margin:0;padding-top:4px;line-height:1.55}
+
+/* ── Timeline / Phases ──────────────────────────────── */
+.timeline{display:flex;flex-direction:column;gap:0;margin-top:8px}
+.phase{display:flex;gap:0;position:relative}
+.phase-left{
+  width:110px;flex-shrink:0;text-align:right;padding-right:24px;padding-top:4px;
+}
+.phase-pill{
+  display:inline-flex;flex-direction:column;align-items:flex-end;
+}
+.phase-pill .p-label{font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:0.06em}
+.phase-pill .p-dur{font-size:11px;color:#94a3b8;margin-top:2px;white-space:nowrap}
+.phase-line{
+  width:2px;background:#e2e8f0;position:relative;flex-shrink:0;
+}
+.phase-dot{
+  width:14px;height:14px;border-radius:50%;position:absolute;
+  top:4px;left:50%;transform:translateX(-50%);border:2px solid #fff;
+}
+.phase-body{flex:1;padding:0 0 36px 24px}
+.phase-title{font-size:15px;font-weight:700;color:#0f172a;margin-bottom:10px}
+.phase-items{display:flex;flex-direction:column;gap:5px}
+.phase-item{display:flex;gap:8px;font-size:12.5px;color:#475569;line-height:1.5}
+.phase-item::before{
+  content:'';width:4px;height:4px;border-radius:50%;background:#94a3b8;
+  margin-top:7px;flex-shrink:0;
+}
+.phase:nth-child(1) .phase-pill .p-label,.phase:nth-child(1) .phase-dot{color:#2563eb;background:#2563eb}
+.phase:nth-child(2) .phase-pill .p-label,.phase:nth-child(2) .phase-dot{color:#7c3aed;background:#7c3aed}
+.phase:nth-child(3) .phase-pill .p-label,.phase:nth-child(3) .phase-dot{color:#0d9488;background:#0d9488}
+.phase:nth-child(4) .phase-pill .p-label,.phase:nth-child(4) .phase-dot{color:#d97706;background:#d97706}
+
+/* ── Camera spec cards ──────────────────────────────── */
+.spec-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:4px}
+.spec-card{
+  background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:14px 16px;
+  border-top:3px solid;
+}
+.spec-card.blue{border-top-color:#2563eb}
+.spec-card.green{border-top-color:#10b981}
+.spec-card.purple{border-top-color:#7c3aed}
+.spec-card.orange{border-top-color:#f59e0b}
+.spec-card.teal{border-top-color:#0d9488}
+.spec-card.rose{border-top-color:#e11d48}
+.spec-card h4{font-size:12px;font-weight:700;color:#0f172a;margin-bottom:4px}
+.spec-card .sc-val{font-size:14px;font-weight:800;color:#2563eb;margin-bottom:4px}
+.spec-card p{font-size:11.5px;color:#64748b;line-height:1.5}
+
+/* ── KPI strip ──────────────────────────────────────── */
+.kpi-strip{
+  display:grid;grid-template-columns:repeat(5,1fr);
+  background:linear-gradient(135deg,#0f172a,#1e293b);
+  border-radius:14px;overflow:hidden;margin-top:0;
+}
+.kpi-item{
+  padding:22px 18px;border-right:1px solid rgba(255,255,255,0.07);
+  text-align:center;
+}
+.kpi-item:last-child{border-right:none}
+.kpi-val{font-size:24px;font-weight:800;color:#fff}
+.kpi-lbl{font-size:10.5px;color:#64748b;text-transform:uppercase;letter-spacing:0.06em;margin-top:5px;font-weight:500}
+.kpi-chg{font-size:11px;font-weight:600;margin-top:3px}
+.kpi-chg.up{color:#34d399}
+.kpi-chg.dn{color:#f87171}
+
+/* ── Footer ─────────────────────────────────────────── */
+.proposal-footer{
+  background:linear-gradient(160deg,#0f172a,#1e293b);
+  padding:40px 60px;display:flex;justify-content:space-between;align-items:flex-end;
+  margin-top:52px;
+}
+.proposal-footer .brand{font-size:18px;font-weight:800;color:#fff;letter-spacing:-0.3px}
+.proposal-footer .brand span{color:#3b82f6}
+.proposal-footer .sub{font-size:11.5px;color:#475569;margin-top:4px}
+.proposal-footer .right{text-align:right}
+.proposal-footer .page-num{font-size:11.5px;color:#475569}
+
+/* ── Helpers ─────────────────────────────────────────── */
+.sp4{height:4px}.sp8{height:8px}.sp12{height:12px}.sp16{height:16px}.sp24{height:24px}.sp32{height:32px}
+.text-blue{color:#2563eb}
+.text-green{color:#059669}
+.text-purple{color:#7c3aed}
+.fw700{font-weight:700}
+.fs12{font-size:12px}
+
+/* ─────────── PRINT STYLES ─────────────────────────── */
+@media print{
+  @page{
+    size:A4 portrait;
+    margin:12mm 13mm 12mm 13mm;
+  }
+  html,body{font-size:11px;background:#fff;width:100%}
+  #print-btn,#print-modal-overlay{display:none!important}
+  .page{max-width:100%;padding:0}
+  .hero{padding:32px 36px 28px;print-color-adjust:exact;-webkit-print-color-adjust:exact;background:#0f172a!important}
+  .hero::after,.hero::before{print-color-adjust:exact;-webkit-print-color-adjust:exact}
+  .hero h1{font-size:32px}
+  .hero .tagline{font-size:14px;margin-bottom:24px}
+  .hero-stats{grid-template-columns:repeat(3,1fr);margin-bottom:20px}
+  .hero-stat .val{font-size:22px}
+  .section{padding:28px 36px 0}
+  .screen-row{padding:18px 36px;page-break-inside:avoid}
+  .screen-row .screen-title{font-size:15px}
+  .screen-row .feature-list li{font-size:11px;gap:7px}
+  .ui-compare{padding:20px 36px;print-color-adjust:exact;-webkit-print-color-adjust:exact}
+  .compare-grid{page-break-inside:avoid}
+  .divider{margin:0 36px}
+  .proposal-footer{padding:22px 36px;print-color-adjust:exact;-webkit-print-color-adjust:exact;background:#0f172a!important}
+  .feat-card,.spec-card{print-color-adjust:exact;-webkit-print-color-adjust:exact}
+  .kpi-strip{print-color-adjust:exact;-webkit-print-color-adjust:exact;page-break-inside:avoid;background:#0f172a!important}
+  thead th{print-color-adjust:exact;-webkit-print-color-adjust:exact}
+  h2{page-break-after:avoid;font-size:17px}
+  .tbl-wrap{page-break-inside:avoid}
+  .phase{page-break-inside:avoid}
+  .print-break{page-break-before:always}
+  .section-icon{display:none}
+  .section-header{gap:8px;margin-bottom:18px}
+  .sp32{height:18px}
+  .sp24{height:12px}
+  .sp16{height:8px}
+  .sp12{height:6px}
+  .sp8{height:4px}
+  .callout{padding:10px 14px;margin-top:12px}
+  .spec-grid{gap:10px}
+  .spec-card{padding:10px 12px}
+  .three-col{gap:10px}
+  .feat-card{padding:12px 14px}
+  table{font-size:11px}
+  tbody td{padding:7px 12px}
+  thead th{padding:8px 12px}
+}
+</style>
+</head>
+<body>
+
+<!-- ── PRINT MODAL ────────────────────────────────────── -->
+<div id="print-modal-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:99999;align-items:center;justify-content:center">
+  <div style="background:#fff;border-radius:16px;padding:36px 40px;max-width:480px;width:90%;position:relative">
+    <div style="font-size:22px;font-weight:800;color:#0f172a;margin-bottom:6px">Save as PDF</div>
+    <div style="font-size:13px;color:#64748b;margin-bottom:24px">Follow these steps to get a clean A4 PDF without browser headers or footers:</div>
+    <div style="display:flex;flex-direction:column;gap:14px;margin-bottom:28px">
+      <div style="display:flex;gap:14px;align-items:flex-start">
+        <div style="width:28px;height:28px;border-radius:8px;background:#2563eb;color:#fff;font-size:13px;font-weight:800;display:flex;align-items:center;justify-content:center;flex-shrink:0">1</div>
+        <div style="font-size:13px;color:#374151;padding-top:4px">Click <strong>Print</strong> — the Chrome print dialog will open</div>
+      </div>
+      <div style="display:flex;gap:14px;align-items:flex-start">
+        <div style="width:28px;height:28px;border-radius:8px;background:#2563eb;color:#fff;font-size:13px;font-weight:800;display:flex;align-items:center;justify-content:center;flex-shrink:0">2</div>
+        <div style="font-size:13px;color:#374151;padding-top:4px">Set <strong>Destination</strong> to <strong style="color:#2563eb">Save as PDF</strong></div>
+      </div>
+      <div style="display:flex;gap:14px;align-items:flex-start">
+        <div style="width:28px;height:28px;border-radius:8px;background:#2563eb;color:#fff;font-size:13px;font-weight:800;display:flex;align-items:center;justify-content:center;flex-shrink:0">3</div>
+        <div style="font-size:13px;color:#374151;padding-top:4px">Set <strong>Paper size</strong> to <strong style="color:#2563eb">A4</strong></div>
+      </div>
+      <div style="display:flex;gap:14px;align-items:flex-start">
+        <div style="width:28px;height:28px;border-radius:8px;background:#e11d48;color:#fff;font-size:13px;font-weight:800;display:flex;align-items:center;justify-content:center;flex-shrink:0">4</div>
+        <div style="font-size:13px;color:#374151;padding-top:4px">Click <strong>More settings</strong> → uncheck <strong style="color:#e11d48">Headers and footers</strong> — this removes the URL and date</div>
+      </div>
+      <div style="display:flex;gap:14px;align-items:flex-start">
+        <div style="width:28px;height:28px;border-radius:8px;background:#059669;color:#fff;font-size:13px;font-weight:800;display:flex;align-items:center;justify-content:center;flex-shrink:0">5</div>
+        <div style="font-size:13px;color:#374151;padding-top:4px">Enable <strong style="color:#059669">Background graphics</strong> — ensures all colours and images print correctly</div>
+      </div>
+      <div style="display:flex;gap:14px;align-items:flex-start">
+        <div style="width:28px;height:28px;border-radius:8px;background:#059669;color:#fff;font-size:13px;font-weight:800;display:flex;align-items:center;justify-content:center;flex-shrink:0">6</div>
+        <div style="font-size:13px;color:#374151;padding-top:4px">Click <strong style="color:#059669">Save</strong> — your clean PDF is ready</div>
+      </div>
+    </div>
+    <div style="display:flex;gap:12px">
+      <button onclick="closePrintModal()" style="flex:1;padding:11px;border:1px solid #e2e8f0;border-radius:8px;background:#f8fafc;font-size:13px;font-weight:600;color:#475569;cursor:pointer">Cancel</button>
+      <button onclick="startPrint()" style="flex:2;padding:11px;border:none;border-radius:8px;background:linear-gradient(135deg,#2563eb,#1d4ed8);font-size:13px;font-weight:700;color:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg>
+        Open Print Dialog
+      </button>
+    </div>
+  </div>
+</div>
+
+<script>
+function openPrintModal(){document.getElementById('print-modal-overlay').style.display='flex'}
+function closePrintModal(){document.getElementById('print-modal-overlay').style.display='none'}
+function startPrint(){closePrintModal();setTimeout(function(){window.print()},200)}
+</script>
+
+<!-- ── PRINT BUTTON ─────────────────────────────────── -->
+<button id="print-btn" onclick="openPrintModal()">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+    <polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/>
+    <rect x="6" y="14" width="12" height="8"/>
+  </svg>
+  Print / Save as PDF
+</button>
+
+<div class="page">
+
+<!-- ══════════════════ HERO COVER ══════════════════════ -->
+<div class="hero">
+  <div class="hero-badge"><div class="dot"></div>Confidential System Proposal &nbsp;·&nbsp; May 2026</div>
+  <h1>CarTrack <span>Pro</span></h1>
+  <div class="tagline">AI-Powered Car Service Monitoring, Vehicle Tracking &amp; Business Analytics Platform</div>
+
+  <div class="hero-stats">
+    <div class="hero-stat"><div class="val">10</div><div class="lbl">Core Modules</div></div>
+    <div class="hero-stat"><div class="val">23<span>+ svcs</span></div><div class="lbl">Service Types</div></div>
+    <div class="hero-stat"><div class="val">4</div><div class="lbl">Access Roles</div></div>
+  </div>
+
+  <div class="hero-meta">
+    <div class="hero-meta-item"><strong>Stack:</strong> React 18 · FastAPI · PostgreSQL · YOLOv8 · EasyOCR</div>
+    <div class="hero-meta-item"><strong>Deployment:</strong> On-Premise · Docker · Nginx</div>
+    <div class="hero-meta-item"><strong>Access:</strong> Web Browser · Mobile · Tablet</div>
+    <div class="hero-meta-item"><strong>Region:</strong> Qatar · QAR Currency · Arabic Plate Support</div>
+  </div>
+</div>
+
+<!-- ══════════════════ EXECUTIVE SUMMARY ══════════════════ -->
+<div class="section" style="padding-top:52px">
+  <div class="section-header">
+    <div class="section-icon" style="background:#eff6ff">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#2563eb" stroke-width="2.2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4l3 3"/></svg>
+    </div>
+    <div class="section-title">
+      <h2>Executive Summary</h2>
+      <p>Why CarTrack Pro — and what it delivers for your business</p>
+    </div>
+  </div>
+
+  <div class="two-col">
+    <div>
+      <h3 style="font-size:15px;color:#0f172a;margin-bottom:10px">The Challenge</h3>
+      <p style="font-size:13px;color:#475569">Car service centres typically manage vehicle tracking, service durations,
+      staff efficiency, and revenue analysis through manual logs, spreadsheets, or disconnected software.
+      This creates critical operational blind spots: delayed service alerts, no vehicle history,
+      zero staff accountability, and missed revenue insights.</p>
+      <div class="sp12"></div>
+      <div class="callout blue">
+        <div class="callout-icon">📌</div>
+        <div>Without a connected system, an average shop loses <strong>15–25% of potential revenue</strong>
+        through untracked delays, unbilled add-on services, and staff inefficiency that goes undetected.</div>
+      </div>
+    </div>
+    <div>
+      <h3 style="font-size:15px;color:#0f172a;margin-bottom:10px">The Solution</h3>
+      <p style="font-size:13px;color:#475569">CarTrack Pro integrates CCTV-based AI plate recognition with a full
+      web management system. Cameras automatically detect plate numbers at entry, match them to customer records,
+      and link data to every service — creating a living database of vehicle history, staff performance,
+      and actionable business intelligence, accessible from any device in real time.</p>
+      <div class="sp12"></div>
+      <div class="callout green">
+        <div class="callout-icon">✓</div>
+        <div>A fully connected system from camera detection → visit creation → service completion →
+        payment → analytics — <strong>with zero manual data re-entry.</strong></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="sp24"></div>
+  <div class="three-col">
+    <div class="feat-card blue"><div class="fc-cat">AI Automation</div><h4>Zero-touch plate detection</h4><p>Cameras read and match plates automatically at entry — no staff input needed to identify returning customers.</p></div>
+    <div class="feat-card green"><div class="fc-cat">Operations</div><h4>Live service-duration tracking</h4><p>Start and Done buttons on every service item record exact timestamps — actual duration calculated automatically.</p></div>
+    <div class="feat-card purple"><div class="fc-cat">Management</div><h4>Staff KPIs from real data</h4><p>Services completed, average duration per staff member, and revenue contribution — all from live system records.</p></div>
+    <div class="feat-card orange"><div class="fc-cat">CRM</div><h4>Complete vehicle history</h4><p>Every visit, service, staff member, duration, and payment for every vehicle — searchable in seconds.</p></div>
+    <div class="feat-card teal"><div class="fc-cat">Finance</div><h4>Revenue &amp; seasonal analytics</h4><p>Daily, monthly, and seasonal revenue trends. Per-service profitability. Peak-hour identification.</p></div>
+    <div class="feat-card rose"><div class="fc-cat">Security</div><h4>Role-based access + audit trail</h4><p>Every create, edit, delete, login, and checkout is permanently recorded. Nothing can be erased.</p></div>
+  </div>
+</div>
+
+<div class="sp32"></div><div class="divider"></div><div class="sp32"></div>
+
+<!-- ══════════════════ DARK / LIGHT UI SHOWCASE ══════════════════ -->
+<div class="ui-compare">
+  <div class="section-header" style="margin-bottom:20px">
+    <div class="section-icon" style="background:#f5f3ff">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#7c3aed" stroke-width="2.2" stroke-linecap="round"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
+    </div>
+    <div class="section-title">
+      <h2>Dark &amp; Light UI — Built-in Theme System</h2>
+      <p>CarTrack Pro includes a full dark/light mode toggle — switch themes instantly from any page with a single click</p>
+    </div>
+  </div>
+
+  <div class="compare-grid">
+    <div class="compare-card">
+      <div class="compare-label dark-lbl"><div class="mode-dot"></div> Dark Mode — Default</div>
+      <img src="CarTrack-Pro-Proposal-assets/dashboard-dark.png" alt="Dark Mode Dashboard" />
+      <div class="compare-desc">Deep navy background with blue accent colours — optimised for extended use in dimly lit service environments and night shifts. Easier on the eyes during long operating hours.</div>
+    </div>
+    <div class="compare-card">
+      <div class="compare-label light-lbl"><div class="mode-dot"></div> Light Mode — Available</div>
+      <img src="CarTrack-Pro-Proposal-assets/dashboard-light.png" alt="Light Mode Dashboard" />
+      <div class="compare-desc">Clean white surface with crisp contrast — ideal for bright reception areas, customer-facing displays, and printed presentations. Theme choice is saved per user device automatically.</div>
+    </div>
+  </div>
+  <div class="callout blue" style="margin-top:20px">
+    <div class="callout-icon">ℹ</div>
+    <div>The theme toggle is always accessible from the sidebar footer. The preference is stored in the browser and restored automatically on every login — no configuration required.</div>
+  </div>
+</div>
+
+<div class="sp32"></div><div class="divider"></div><div class="sp32"></div>
+
+<!-- ══════════════════ FEATURE WALKTHROUGH ══════════════════ -->
+<div class="section" style="padding-bottom:0">
+  <div class="section-header">
+    <div class="section-icon" style="background:#f0fdf4">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#059669" stroke-width="2.2" stroke-linecap="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+    </div>
+    <div class="section-title">
+      <h2>Platform Features — Complete Walkthrough</h2>
+      <p>All 10 screenshots are taken from the live production system — every module is fully operational</p>
+    </div>
+  </div>
+</div>
+
+<!-- 1 · Dashboard -->
+<div class="screen-row">
+  <div class="img-wrap">
+    <img src="CarTrack-Pro-Proposal-assets/dashboard-dark.png" alt="Dashboard"/>
+    <div class="img-badge" style="background:linear-gradient(135deg,#2563eb,#1d4ed8)">Module 01</div>
+  </div>
+  <div class="desc">
+    <div class="seq-num" style="background:linear-gradient(135deg,#2563eb,#7c3aed)">1</div>
+    <div class="screen-tag text-blue">Real-Time Command Center</div>
+    <div class="screen-title">Live Operations Dashboard</div>
+    <ul class="feature-list">
+      <li><div class="bullet" style="background:#2563eb"></div>Live KPI cards: Cars Today, In Shop Now, Completed, Today's Revenue — refreshed automatically every 30 seconds</li>
+      <li><div class="bullet" style="background:#2563eb"></div>Smart alert banner automatically flags vehicles waiting over 90 minutes with plate numbers and duration</li>
+      <li><div class="bullet" style="background:#2563eb"></div>Interactive 5-bay map shows which bays are occupied live, with average service time displayed per active bay</li>
+      <li><div class="bullet" style="background:#2563eb"></div>Hourly Traffic area chart visualises car entry patterns across the full day to identify peak periods</li>
+      <li><div class="bullet" style="background:#2563eb"></div>Active Visits table with live elapsed-time timers, status colour codes, bay assignments, and service summaries</li>
+      <li><div class="bullet" style="background:#2563eb"></div>Personalised greeting with role-aware content — managers see all data; staff see their own assignments</li>
+    </ul>
+  </div>
+</div>
+
+<!-- 2 · Visits -->
+<div class="screen-row alt">
+  <div class="img-wrap">
+    <img src="CarTrack-Pro-Proposal-assets/screen-visits.png" alt="Visits"/>
+    <div class="img-badge" style="background:linear-gradient(135deg,#059669,#0d9488)">Module 02</div>
+  </div>
+  <div class="desc">
+    <div class="seq-num" style="background:linear-gradient(135deg,#059669,#0d9488)">2</div>
+    <div class="screen-tag text-green">Full Visit Lifecycle Tracking</div>
+    <div class="screen-title">Visit Management</div>
+    <ul class="feature-list">
+      <li><div class="bullet" style="background:#059669"></div>Status filter tabs — All, Waiting, In Service, On Hold, Completed, Cancelled — with live counts per status</li>
+      <li><div class="bullet" style="background:#059669"></div>Live elapsed timers turn amber at 1 hour and red at 2 hours — automatic visual escalation with no manual input</li>
+      <li><div class="bullet" style="background:#059669"></div>One-click Checkout, Edit, and Delete directly from each row — zero navigation required for common actions</li>
+      <li><div class="bullet" style="background:#059669"></div>Every plate number is a hyperlink to that vehicle's complete history profile</li>
+      <li><div class="bullet" style="background:#059669"></div>Real-time search by plate number or customer name — filters as you type across all 50+ records</li>
+      <li><div class="bullet" style="background:#059669"></div>Inline delete confirmation modal prevents accidental data loss without leaving the page</li>
+    </ul>
+  </div>
+</div>
+
+<!-- 3 · New Visit -->
+<div class="screen-row">
+  <div class="img-wrap">
+    <img src="CarTrack-Pro-Proposal-assets/screen-new-visit.png" alt="New Visit"/>
+    <div class="img-badge" style="background:linear-gradient(135deg,#7c3aed,#2563eb)">Module 03</div>
+  </div>
+  <div class="desc">
+    <div class="seq-num" style="background:linear-gradient(135deg,#7c3aed,#2563eb)">3</div>
+    <div class="screen-tag text-purple">Intelligent Entry Form</div>
+    <div class="screen-title">New Visit — 4-Step Wizard</div>
+    <ul class="feature-list">
+      <li><div class="bullet" style="background:#7c3aed"></div>Step 1 — Plate Lookup: auto-fills make, model, year, colour, owner name and phone from the database</li>
+      <li><div class="bullet" style="background:#7c3aed"></div>Returning-customer banner shows visit count and last visit date — staff see full context immediately</li>
+      <li><div class="bullet" style="background:#7c3aed"></div>Step 3 — Services: multi-select services and assign a specific staff member per service item</li>
+      <li><div class="bullet" style="background:#7c3aed"></div>Step 4 — Digital Signature: customer signs on screen using touch or mouse before work begins</li>
+      <li><div class="bullet" style="background:#7c3aed"></div>Form can pre-fill automatically from an AI camera detection event when a plate is recognised at the gate</li>
+      <li><div class="bullet" style="background:#7c3aed"></div>Vehicle type (Sedan, SUV, Pickup, Van, Luxury) recorded at entry for analytics segmentation by type</li>
+    </ul>
+  </div>
+</div>
+
+<!-- 4 · Visit Detail -->
+<div class="screen-row alt">
+  <div class="img-wrap">
+    <img src="CarTrack-Pro-Proposal-assets/screen-visit-detail.png" alt="Visit Detail"/>
+    <div class="img-badge" style="background:linear-gradient(135deg,#0d9488,#059669)">Module 04</div>
+  </div>
+  <div class="desc">
+    <div class="seq-num" style="background:linear-gradient(135deg,#0d9488,#059669)">4</div>
+    <div class="screen-tag" style="color:#0d9488">Per-Service Progress Monitor</div>
+    <div class="screen-title">Visit Detail &amp; Service Tracking</div>
+    <ul class="feature-list">
+      <li><div class="bullet" style="background:#0d9488"></div>Live visit duration counter, total cost (QAR), service count, and payment status in 4 KPI cards at the top</li>
+      <li><div class="bullet" style="background:#0d9488"></div>Each service item has Start and Done buttons — exact timestamps recorded for actual duration calculation</li>
+      <li><div class="bullet" style="background:#0d9488"></div>Actual duration = Done time minus Start time — measured automatically, feeds directly into analytics</li>
+      <li><div class="bullet" style="background:#0d9488"></div>Assigned staff member shown per service with initials avatar — can be reassigned on the fly</li>
+      <li><div class="bullet" style="background:#0d9488"></div>Add Service button allows additional services to be added mid-visit without creating a new entry</li>
+      <li><div class="bullet" style="background:#0d9488"></div>Print Receipt generates a formatted, branded receipt for the customer at checkout</li>
+    </ul>
+  </div>
+</div>
+
+<!-- 5 · Vehicle Profile -->
+<div class="screen-row">
+  <div class="img-wrap">
+    <img src="CarTrack-Pro-Proposal-assets/screen-vehicle-profile.png" alt="Vehicle Profile"/>
+    <div class="img-badge" style="background:linear-gradient(135deg,#d97706,#f59e0b)">Module 05</div>
+  </div>
+  <div class="desc">
+    <div class="seq-num" style="background:linear-gradient(135deg,#d97706,#f59e0b)">5</div>
+    <div class="screen-tag" style="color:#d97706">Complete Customer &amp; Vehicle Record</div>
+    <div class="screen-title">Vehicle Profile &amp; Full History</div>
+    <ul class="feature-list">
+      <li><div class="bullet" style="background:#d97706"></div>Header KPIs: Total Visits (48), Total Spent (QAR 6,554), Average Duration (82m), Services Used (19)</li>
+      <li><div class="bullet" style="background:#d97706"></div>Every service type ever performed on this vehicle shown as colour-coded category chips</li>
+      <li><div class="bullet" style="background:#d97706"></div>Full chronological visit history — each record shows date, duration, bay, services, staff, and price</li>
+      <li><div class="bullet" style="background:#d97706"></div>Per-visit service items expanded with staff name, actual duration, and service category tag</li>
+      <li><div class="bullet" style="background:#d97706"></div>Payment status (Paid / Unpaid / Waived) and bay assignment recorded and displayed per visit</li>
+      <li><div class="bullet" style="background:#d97706"></div>New Visit button creates a pre-filled entry for this vehicle — one click from the profile</li>
+    </ul>
+  </div>
+</div>
+
+<!-- 6 · Services -->
+<div class="screen-row alt">
+  <div class="img-wrap">
+    <img src="CarTrack-Pro-Proposal-assets/screen-services.png" alt="Services"/>
+    <div class="img-badge" style="background:linear-gradient(135deg,#7c3aed,#d97706)">Module 06</div>
+  </div>
+  <div class="desc">
+    <div class="seq-num" style="background:linear-gradient(135deg,#7c3aed,#d97706)">6</div>
+    <div class="screen-tag text-purple">Pricing &amp; Duration Management</div>
+    <div class="screen-title">Services Catalogue</div>
+    <ul class="feature-list">
+      <li><div class="bullet" style="background:#7c3aed"></div>23 services across 6 categories: Detailing, Inspection, Maintenance, Polish, Repair, Wash</li>
+      <li><div class="bullet" style="background:#7c3aed"></div>Each card: name, full description, estimated duration, and base price in QAR — all editable</li>
+      <li><div class="bullet" style="background:#7c3aed"></div>Prices range from QAR 40 (Tyre Rotation) to QAR 800 (Ceramic Coating) covering full service spectrum</li>
+      <li><div class="bullet" style="background:#7c3aed"></div>Edit any service — updated price and duration propagate automatically to all new visits</li>
+      <li><div class="bullet" style="background:#7c3aed"></div>Category filter tabs for instant navigation — colour-coded per category type</li>
+      <li><div class="bullet" style="background:#7c3aed"></div>Estimated duration is used as the analytics benchmark for comparing actual vs. target service times</li>
+    </ul>
+  </div>
+</div>
+
+<!-- 7 · Analytics -->
+<div class="screen-row">
+  <div class="img-wrap">
+    <img src="CarTrack-Pro-Proposal-assets/screen-analytics.png" alt="Analytics"/>
+    <div class="img-badge" style="background:linear-gradient(135deg,#2563eb,#06b6d4)">Module 07</div>
+  </div>
+  <div class="desc">
+    <div class="seq-num" style="background:linear-gradient(135deg,#2563eb,#06b6d4)">7</div>
+    <div class="screen-tag text-blue">Business Intelligence &amp; KPI Engine</div>
+    <div class="screen-title">Advanced Analytics — 4 Tabs</div>
+    <ul class="feature-list">
+      <li><div class="bullet" style="background:#2563eb"></div>Overview tab: Total Cars, Avg Duration, Total Revenue, Peak Hour — with trend % vs. previous period</li>
+      <li><div class="bullet" style="background:#2563eb"></div>Daily Traffic &amp; Revenue dual-axis bar chart — see car count and revenue side by side per day</li>
+      <li><div class="bullet" style="background:#2563eb"></div>Service Distribution donut chart — instantly see which service types generate the most volume</li>
+      <li><div class="bullet" style="background:#2563eb"></div>Services tab: actual vs. estimated duration per service type — identify where time overruns occur</li>
+      <li><div class="bullet" style="background:#2563eb"></div>Staff KPIs tab: services completed, average duration per job, and revenue attributed per staff member</li>
+      <li><div class="bullet" style="background:#2563eb"></div>Seasonal tab: full-year monthly revenue and avg duration — plan staffing and pricing by season</li>
+    </ul>
+  </div>
+</div>
+
+<!-- 8 · Users -->
+<div class="screen-row">
+  <div class="img-wrap">
+    <img src="CarTrack-Pro-Proposal-assets/screen-users.png" alt="Users"/>
+    <div class="img-badge" style="background:linear-gradient(135deg,#7c3aed,#e11d48)">Module 08</div>
+  </div>
+  <div class="desc">
+    <div class="seq-num" style="background:linear-gradient(135deg,#7c3aed,#e11d48)">8</div>
+    <div class="screen-tag text-purple">Role-Based Access Management</div>
+    <div class="screen-title">Users &amp; Access Control</div>
+    <ul class="feature-list">
+      <li><div class="bullet" style="background:#7c3aed"></div>4 roles: Admin (full access), Manager (operations + reports), Staff (visits + services), Viewer (read-only)</li>
+      <li><div class="bullet" style="background:#7c3aed"></div>Admin and Manager roles unlock the full Admin section — Users, Audit Log, Settings</li>
+      <li><div class="bullet" style="background:#7c3aed"></div>Each user: avatar with initials, full name, username, email, role badge, status, and join date</li>
+      <li><div class="bullet" style="background:#7c3aed"></div>Filter by role using the pill tabs at the top — see all Staff, all Managers, etc. instantly</li>
+      <li><div class="bullet" style="background:#7c3aed"></div>Edit user details or reset passwords from the action menu — no backend access needed</li>
+      <li><div class="bullet" style="background:#7c3aed"></div>Status badge (Active / Inactive) — deactivate accounts without deleting their history</li>
+    </ul>
+  </div>
+</div>
+
+<!-- 9 · Audit -->
+<div class="screen-row alt">
+  <div class="img-wrap">
+    <img src="CarTrack-Pro-Proposal-assets/screen-audit.png" alt="Audit"/>
+    <div class="img-badge" style="background:linear-gradient(135deg,#475569,#0f172a)">Module 09</div>
+  </div>
+  <div class="desc">
+    <div class="seq-num" style="background:linear-gradient(135deg,#475569,#0f172a)">9</div>
+    <div class="screen-tag" style="color:#475569">Full Compliance &amp; Activity Trail</div>
+    <div class="screen-title">Audit Log</div>
+    <ul class="feature-list">
+      <li><div class="bullet" style="background:#475569"></div>Every create, update, delete, login, logout, and checkout is permanently recorded with timestamp</li>
+      <li><div class="bullet" style="background:#475569"></div>Timeline view: user avatar, colour-coded action badge (Create / Update / Delete), entity, and time</li>
+      <li><div class="bullet" style="background:#475569"></div>Filter by action type and entity type independently — narrow down to specific events instantly</li>
+      <li><div class="bullet" style="background:#475569"></div>Pagination at 40 events per page — loads fast even with thousands of historical records</li>
+      <li><div class="bullet" style="background:#475569"></div>Immutable — no user at any role level can delete or modify audit entries</li>
+      <li><div class="bullet" style="background:#475569"></div>Essential for insurance audits, dispute resolution, and staff accountability reviews</li>
+    </ul>
+  </div>
+</div>
+
+<!-- 10 · Settings -->
+<div class="screen-row">
+  <div class="img-wrap">
+    <img src="CarTrack-Pro-Proposal-assets/screen-settings.png" alt="Settings"/>
+    <div class="img-badge" style="background:linear-gradient(135deg,#0d9488,#2563eb)">Module 10</div>
+  </div>
+  <div class="desc">
+    <div class="seq-num" style="background:linear-gradient(135deg,#0d9488,#2563eb)">10</div>
+    <div class="screen-tag" style="color:#0d9488">Full Configuration Control</div>
+    <div class="screen-title">System Settings</div>
+    <ul class="feature-list">
+      <li><div class="bullet" style="background:#0d9488"></div>General: Business name, phone number, address, currency (QAR default), and timezone (Asia/Qatar)</li>
+      <li><div class="bullet" style="background:#0d9488"></div>Operations: Service bay count, peak hour window definition, and late-car alert threshold (minutes)</li>
+      <li><div class="bullet" style="background:#0d9488"></div>Notifications: Configure alert triggers for late vehicles and daily summary report delivery</li>
+      <li><div class="bullet" style="background:#0d9488"></div>System: Backup schedule, data retention period, and external API integration management</li>
+      <li><div class="bullet" style="background:#0d9488"></div>Security: Password complexity rules, session timeout, and two-factor authentication toggle</li>
+      <li><div class="bullet" style="background:#0d9488"></div>5-section sidebar navigation — General, Operations, Notifications, System, Security</li>
+    </ul>
+  </div>
+</div>
+
+<div class="sp32"></div><div class="divider"></div>
+
+<!-- ══════════════════ SYSTEM REQUIREMENTS ══════════════════ -->
+<div class="section print-break">
+  <div class="section-header">
+    <div class="section-icon" style="background:#f5f3ff">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#7c3aed" stroke-width="2.2" stroke-linecap="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/><path d="M7 8h10M7 12h5"/></svg>
+    </div>
+    <div class="section-title">
+      <h2>Full System Requirements</h2>
+      <p>Hardware, software, and network specifications for a production-ready deployment</p>
+    </div>
+  </div>
+
+  <h3 style="font-size:15px;font-weight:700;color:#0f172a;margin-bottom:14px">AI Processing Server — On-Premise</h3>
+  <div class="tbl-wrap th-purple">
+    <table>
+      <thead><tr><th>Component</th><th>Minimum</th><th>Recommended</th></tr></thead>
+      <tbody>
+        <tr><td><strong>CPU</strong></td><td>Intel Core i7-12700 / AMD Ryzen 7 5800X</td><td><span class="tag rec">REC</span> Intel Core i9-13900K / AMD Ryzen 9 7950X</td></tr>
+        <tr><td><strong>RAM</strong></td><td>32 GB DDR4</td><td><span class="tag rec">REC</span> 64 GB DDR5</td></tr>
+        <tr><td><strong>GPU (AI Inference)</strong></td><td>NVIDIA RTX 3060 12GB VRAM</td><td><span class="tag rec">REC</span> NVIDIA RTX 4080 / RTX 4090</td></tr>
+        <tr><td><strong>Primary Storage</strong></td><td>1 TB NVMe SSD</td><td><span class="tag rec">REC</span> 2 TB NVMe SSD (OS + models + database)</td></tr>
+        <tr><td><strong>Video Archive</strong></td><td>8 TB HDD RAID-1 (30-day retention)</td><td><span class="tag rec">REC</span> 16 TB RAID-5 NAS (90-day retention)</td></tr>
+        <tr><td><strong>Network Card</strong></td><td>1 Gbps Ethernet</td><td><span class="tag rec">REC</span> 2.5 Gbps Ethernet</td></tr>
+        <tr><td><strong>UPS</strong></td><td>1500VA APC or equivalent</td><td><span class="tag rec">REC</span> 3000VA with AVR and auto-shutdown</td></tr>
+        <tr><td><strong>Operating System</strong></td><td>Windows Server 2022</td><td><span class="tag rec">REC</span> Ubuntu 22.04 LTS (preferred for AI stack)</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="sp24"></div>
+  <h3 style="font-size:15px;font-weight:700;color:#0f172a;margin-bottom:14px">Network Infrastructure</h3>
+  <div class="tbl-wrap th-teal">
+    <table>
+      <thead><tr><th>Component</th><th>Specification</th><th>Purpose</th></tr></thead>
+      <tbody>
+        <tr><td><strong>PoE Switch</strong></td><td>24-port Managed PoE+ (802.3at), Gigabit</td><td>Power and connect all IP cameras via single cable run</td></tr>
+        <tr><td><strong>Core Switch</strong></td><td>Managed L2/L3 Gigabit with VLAN support</td><td>Isolate camera VLAN from office and client networks</td></tr>
+        <tr><td><strong>NVR (backup)</strong></td><td>32-channel 4K NVR with RAID storage</td><td>Local video recording independent of AI server</td></tr>
+        <tr><td><strong>Internet</strong></td><td>100 Mbps symmetric fibre (minimum)</td><td>Remote management, cloud backup, and software updates</td></tr>
+        <tr><td><strong>Firewall / VPN</strong></td><td>FortiGate 60F / pfSense with IPS</td><td>Secure remote access and network segmentation</td></tr>
+        <tr><td><strong>Wi-Fi</strong></td><td>Wi-Fi 6 AP — Ubiquiti / TP-Link Omada</td><td>Staff tablets, mobile access, customer-facing displays</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="sp24"></div>
+  <h3 style="font-size:15px;font-weight:700;color:#0f172a;margin-bottom:14px">Software Stack</h3>
+  <div class="tbl-wrap th-slate">
+    <table>
+      <thead><tr><th>Layer</th><th>Technology</th><th>Role</th></tr></thead>
+      <tbody>
+        <tr><td><strong>AI Engine</strong></td><td>Python 3.11, YOLOv8, EasyOCR, OpenCV</td><td>Vehicle detection and plate reading from RTSP streams</td></tr>
+        <tr><td><strong>Backend API</strong></td><td>FastAPI (Python), SQLAlchemy ORM, Alembic</td><td>REST API serving all frontend requests and business logic</td></tr>
+        <tr><td><strong>Database</strong></td><td>PostgreSQL 15 (production deployment)</td><td>Persistent storage for visits, vehicles, users, analytics</td></tr>
+        <tr><td><strong>Real-time Push</strong></td><td>WebSocket — FastAPI native</td><td>Camera detection events and live updates pushed to frontend</td></tr>
+        <tr><td><strong>Frontend</strong></td><td>React 18, TypeScript, Vite, TanStack Query</td><td>Full web dashboard — all 11 modules, dark + light themes</td></tr>
+        <tr><td><strong>Charts</strong></td><td>Recharts</td><td>All analytics visualisations — bar, line, pie, donut, area</td></tr>
+        <tr><td><strong>Authentication</strong></td><td>JWT tokens + bcrypt, RBAC middleware</td><td>Secure login, persistent sessions, role-based access</td></tr>
+        <tr><td><strong>Containerisation</strong></td><td>Docker + Docker Compose</td><td>One-command deployment, environment consistency</td></tr>
+        <tr><td><strong>Reverse Proxy</strong></td><td>Nginx with HTTPS/TLS</td><td>SSL termination, static asset caching, load balancing</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="sp24"></div>
+  <h3 style="font-size:15px;font-weight:700;color:#0f172a;margin-bottom:14px">Client Device Requirements</h3>
+  <div class="tbl-wrap th-blue">
+    <table>
+      <thead><tr><th>Device</th><th>Minimum Spec</th><th>Primary Use Case</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Manager Workstation</strong></td><td>Any modern PC, 8 GB RAM, Chrome / Firefox / Edge</td><td>Dashboard, analytics, user management, audit review</td></tr>
+        <tr><td><strong>Reception Tablet</strong></td><td>10" iPad or Android tablet, Wi-Fi, Chrome</td><td>New visit wizard, customer digital signature capture</td></tr>
+        <tr><td><strong>Staff Mobile</strong></td><td>iOS 14+ / Android 11+, any modern browser</td><td>Start/Done service buttons, visit status updates</td></tr>
+        <tr><td><strong>Bay Display</strong></td><td>24"+ HDMI monitor, connected to AI server or PC</td><td>Current vehicle, service status, duration for technicians</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="sp32"></div><div class="divider"></div>
+
+<!-- ══════════════════ IMPLEMENTATION PHASES ══════════════════ -->
+<div class="section">
+  <div class="section-header">
+    <div class="section-icon" style="background:#f0fdf4">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#059669" stroke-width="2.2" stroke-linecap="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+    </div>
+    <div class="section-title">
+      <h2>Implementation Phases</h2>
+      <p>A structured 6-week go-live plan followed by ongoing optimisation and support</p>
+    </div>
+  </div>
+
+  <div class="timeline">
+    <div class="phase">
+      <div class="phase-left">
+        <div class="phase-pill">
+          <div class="p-label" style="color:#2563eb">Phase 1</div>
+          <div class="p-dur">Weeks 1–2</div>
+        </div>
+      </div>
+      <div class="phase-line"><div class="phase-dot" style="background:#2563eb"></div></div>
+      <div class="phase-body">
+        <div class="phase-title">Core Infrastructure &amp; Installation</div>
+        <div class="phase-items">
+          <div class="phase-item">AI server hardware procurement, rack installation, and Ubuntu OS configuration</div>
+          <div class="phase-item">Network switch, structured cabling, PoE layout, and camera physical installation</div>
+          <div class="phase-item">PostgreSQL database setup, Alembic schema migration, and initial admin data load</div>
+          <div class="phase-item">FastAPI backend and Nginx reverse proxy deployment with HTTPS/TLS certificate</div>
+          <div class="phase-item">React frontend build and static file deployment — accessible on local network</div>
+        </div>
+      </div>
+    </div>
+    <div class="phase">
+      <div class="phase-left">
+        <div class="phase-pill">
+          <div class="p-label" style="color:#7c3aed">Phase 2</div>
+          <div class="p-dur">Weeks 3–4</div>
+        </div>
+      </div>
+      <div class="phase-line"><div class="phase-dot" style="background:#7c3aed"></div></div>
+      <div class="phase-body">
+        <div class="phase-title">AI Integration &amp; Accuracy Calibration</div>
+        <div class="phase-items">
+          <div class="phase-item">YOLOv8 model calibration per camera angle, lens zoom, and Qatar lighting conditions</div>
+          <div class="phase-item">EasyOCR fine-tuning for Qatar plate format — Arabic numerals and Latin characters</div>
+          <div class="phase-item">RTSP stream integration — all cameras connected and verified in the system</div>
+          <div class="phase-item">WebSocket detection event testing — live feed verified in the Camera Network module</div>
+          <div class="phase-item">Plate recognition accuracy validation — target 90%+ across all gate cameras</div>
+        </div>
+      </div>
+    </div>
+    <div class="phase">
+      <div class="phase-left">
+        <div class="phase-pill">
+          <div class="p-label" style="color:#0d9488">Phase 3</div>
+          <div class="p-dur">Weeks 5–6</div>
+        </div>
+      </div>
+      <div class="phase-line"><div class="phase-dot" style="background:#0d9488"></div></div>
+      <div class="phase-body">
+        <div class="phase-title">Staff Training &amp; Operations Go-Live</div>
+        <div class="phase-items">
+          <div class="phase-item">Full staff training on visit wizard, service tracking, checkout, and signature capture</div>
+          <div class="phase-item">Historical vehicle and customer data import from existing records</div>
+          <div class="phase-item">Service catalogue setup — prices, descriptions, and estimated durations configured</div>
+          <div class="phase-item">Analytics dashboard review with management — KPI baselines established</div>
+          <div class="phase-item">Receipt printing, mobile access, and tablet signature-capture testing and sign-off</div>
+        </div>
+      </div>
+    </div>
+    <div class="phase">
+      <div class="phase-left">
+        <div class="phase-pill">
+          <div class="p-label" style="color:#d97706">Phase 4</div>
+          <div class="p-dur">Ongoing</div>
+        </div>
+      </div>
+      <div class="phase-line" style="background:transparent"><div class="phase-dot" style="background:#d97706"></div></div>
+      <div class="phase-body" style="padding-bottom:0">
+        <div class="phase-title">Support, Optimisation &amp; Growth</div>
+        <div class="phase-items">
+          <div class="phase-item">Monthly AI model accuracy reports — re-training as plate formats or conditions change</div>
+          <div class="phase-item">Feature additions based on operational feedback and new business requirements</div>
+          <div class="phase-item">Database backup verification and disaster recovery drill (quarterly)</div>
+          <div class="phase-item">Performance monitoring, scaling, and security patch management</div>
+          <div class="phase-item">Analytics review sessions — revenue optimisation insights delivered to management</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="sp32"></div><div class="divider"></div>
+
+<!-- ══════════════════ VALUE SUMMARY KPI STRIP ══════════════════ -->
+<div class="section">
+  <div class="section-header">
+    <div class="section-icon" style="background:#fff7ed">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#d97706" stroke-width="2.2" stroke-linecap="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 1 0 0 7h5a3.5 3.5 0 1 1 0 7H6"/></svg>
+    </div>
+    <div class="section-title">
+      <h2>System Value at a Glance</h2>
+      <p>Live figures from an existing client implementation — recorded over the first operational weeks of the system</p>
+    </div>
+  </div>
+
+  <div class="kpi-strip">
+    <div class="kpi-item"><div class="kpi-val">49</div><div class="kpi-lbl">Cars (7 days)</div><div class="kpi-chg up">+12% vs prev</div></div>
+    <div class="kpi-item"><div class="kpi-val">79m</div><div class="kpi-lbl">Avg Duration</div><div class="kpi-chg dn">-5% improved</div></div>
+    <div class="kpi-item"><div class="kpi-val">QAR 7,128</div><div class="kpi-lbl">Revenue (7 days)</div><div class="kpi-chg up">+18% vs prev</div></div>
+    <div class="kpi-item"><div class="kpi-val">10:00</div><div class="kpi-lbl">Peak Hour</div><div class="kpi-chg up">Identified</div></div>
+    <div class="kpi-item"><div class="kpi-val">71%</div><div class="kpi-lbl">AI Match Rate</div><div class="kpi-chg up">Live cameras</div></div>
+  </div>
+</div>
+
+<!-- ══════════════════ FOOTER ══════════════════ -->
+<div class="proposal-footer">
+  <div>
+    <div class="brand">CarTrack <span>Pro</span></div>
+    <div class="sub">AI Monitoring System &nbsp;·&nbsp; Confidential System Proposal &nbsp;·&nbsp; May 2026</div>
+    <div class="sub" style="margin-top:4px">Designed for: Car Service Centre &nbsp;·&nbsp; Location: Qatar &nbsp;·&nbsp; Currency: QAR</div>
+  </div>
+  <div class="right">
+    <div style="font-size:12px;color:#94a3b8;font-weight:500">Prepared for client review</div>
+    <div class="sub" style="margin-top:4px">All content is confidential and proprietary</div>
+    <div class="sub" style="margin-top:4px">Stack: React · FastAPI · PostgreSQL · YOLOv8 · Docker</div>
+  </div>
+</div>
+
+</div><!-- /page -->
+</body>
+</html>

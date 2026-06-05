@@ -1,0 +1,29 @@
+# CarTrack API on Render — https://render.com/docs/blueprint-spec
+# Connect repo → New Blueprint → use this file.
+# Then set VITE_API_URL on Vercel to the Render service URL (https://cartrack-api.onrender.com).
+
+services:
+  - type: web
+    name: cartrack-api
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    plan: free
+    healthCheckPath: /api/health
+    envVars:
+      - key: DATABASE_URL
+        value: sqlite:///./cartrack.db
+      - key: SECRET_KEY
+        generateValue: true
+      - key: DEBUG
+        value: "false"
+      - key: ALLOWED_ORIGINS
+        sync: false
+      - key: LIVE_RESUME_ON_STARTUP
+        value: "false"
+      - key: LIVE_PROBE_CAMERAS_ON_STARTUP
+        value: "false"
+      - key: LIVE_24_7_ENABLED
+        value: "false"
+      - key: USE_GPU
+        value: "false"

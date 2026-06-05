@@ -1,0 +1,53 @@
+# ── Core Web Framework ─────────────────────────────────────────────────────
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+python-multipart>=0.0.9
+
+# ── Database ────────────────────────────────────────────────────────────────
+sqlalchemy>=2.0.30
+alembic>=1.13.1
+psycopg2-binary>=2.9.10      # PostgreSQL driver — 2.9.10+ has Python 3.13 wheels
+pymysql>=1.1.1                # MySQL / MariaDB (XAMPP) via mysql+pymysql://...
+aiosqlite>=0.20.0             # SQLite async support (dev / default mode)
+
+# ── Auth / Security ─────────────────────────────────────────────────────────
+python-jose[cryptography]>=3.3.0
+bcrypt>=4.1.3
+
+# ── Settings / Config ───────────────────────────────────────────────────────
+python-dotenv>=1.0.1
+pydantic>=2.7.1
+pydantic-settings>=2.2.1
+email-validator>=2.1.1
+
+# ── File / Storage ──────────────────────────────────────────────────────────
+aiofiles>=23.2.1
+pillow>=10.4.0                # 10.4+ has Python 3.13 wheels
+
+# ── HTTP / WebSocket ────────────────────────────────────────────────────────
+httpx>=0.27.0
+websockets>=12.0
+xmltodict>=0.13.0              # Dahua P2P cloud tunnel (vendor/dh_p2p)
+
+# ── Computer Vision — use opencv-python (not headless) for USB/webcam on Windows ──
+opencv-python>=4.9.0
+numpy>=1.26.4                 # pip will select 2.x on Python 3.13 automatically
+imageio>=2.34.0               # decode “difficult” MP4 (Shorts/VP9) via bundled FFmpeg
+imageio-ffmpeg>=0.5.1         # ships ffmpeg.exe — works without system PATH
+
+# ── OCR Engine ────────────────────────────────────────────────────────────────
+# Primary: fast-plate-ocr (purpose-built plate OCR, ~96%+, ONNX, CPU-friendly).
+# Fallback: EasyOCR (~91%) — used automatically if fast-plate-ocr is unavailable.
+fast-plate-ocr[onnx]>=1.1.0
+easyocr>=1.7.1
+ultralytics>=8.4.0              # YOLO26 support (Jan 2026+)
+lap>=0.5.12                 # ByteTrack / BoT-SORT (YOLO11 live tracking)
+huggingface_hub>=0.20.0
+
+# ── Data / Analytics ────────────────────────────────────────────────────────
+pandas>=2.2.2
+openpyxl>=3.1.2
+pytz>=2024.1
+
+# ── Rate Limiting ────────────────────────────────────────────────────────────
+slowapi>=0.1.9

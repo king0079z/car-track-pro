@@ -1,0 +1,50 @@
+# Secrets & local config
+backend/.env
+backend/.env.*
+frontend/.env
+frontend/.env.local
+frontend/.env.production.local
+backend/cameras.json
+scripts/.tunnel-url.txt
+scripts/cloudflared.exe
+
+# Python
+backend/venv/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# Node
+frontend/node_modules/
+frontend/dist/
+coverage/
+playwright-report/
+test-results/
+
+# Data & uploads
+backend/*.db
+backend/*.db-shm
+backend/*.db-wal
+backend/outputs/
+backend/uploads/*
+!backend/uploads/.gitkeep
+uploads/*
+!uploads/.gitkeep
+*.mp4
+*.mov
+*.avi
+*.log
+backend/p2p_out.txt
+backend/vendor/dh_p2p/*.txt
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Build artifacts
+*.pt
+!backend/models/.gitkeep

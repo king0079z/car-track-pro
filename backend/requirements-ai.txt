@@ -1,0 +1,7 @@
+# ── Heavy AI dependencies (optional — only needed for YOLO vehicle detection) ─
+# Install alongside requirements.txt:  pip install -r requirements-ai.txt
+# WARNING: torch alone is ~2 GB download. Only install if using GPU-accelerated YOLO.
+
+torch==2.3.0
+torchvision==0.18.0
+ultralytics==8.2.18          # YOLOv8 — vehicle bounding box detection
