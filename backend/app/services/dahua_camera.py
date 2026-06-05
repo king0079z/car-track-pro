@@ -475,10 +475,8 @@ def public_dahua_config() -> dict[str, Any]:
                 )
         except ValueError:
             configured = False
-    cloud = {}
-    serial = str(cfg.get("device_serial") or "").strip()
-    if serial and _connection_mode(cfg) in ("p2p", "auto"):
-        cloud = cloud_device_status_fast(serial)
+    # Cloud summary is loaded separately via GET /cloud-status (never block settings page).
+    cloud: dict[str, Any] = {}
     cartrack_relay = {}
     if _connection_mode(cfg) == "cartrack_relay":
         from .cartrack_cloud_relay import get_cartrack_relay_manager, relay_urls_from_config

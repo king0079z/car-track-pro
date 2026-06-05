@@ -328,7 +328,7 @@ export type DahuaHeroA1Public = {
 
 export const camerasApi = {
   profiles: () => api.get('/api/cameras/profiles'),
-  getHeroA1: () => api.get<DahuaHeroA1Public>('/api/cameras/dahua/hero-a1', { timeout: 15000 }),
+  getHeroA1: () => api.get<DahuaHeroA1Public>('/api/cameras/dahua/hero-a1', { timeout: 8000 }),
   getHeroCloudStatus: () =>
     api.get<{ online?: boolean | null; randsalt?: boolean | null; tunnel?: Record<string, unknown> }>(
       '/api/cameras/dahua/hero-a1/cloud-status',

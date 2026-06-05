@@ -178,6 +178,7 @@ class DahuaP2PTunnelManager:
                 ):
                     return {"ok": True, "local_port": port, "reused": True}
 
+            proc_to_wait = None
             with self._lock:
                 proc = self._proc
                 if (
@@ -186,14 +187,18 @@ class DahuaP2PTunnelManager:
                     and self._serial == serial
                     and self._local_port == port
                 ):
-                    waited = self._wait_until_ready(proc, timeout_sec=180.0)
-                    if waited.get("ok"):
-                        return {"ok": True, "local_port": port, "reused": False, "waited": True}
-                    last_detail = waited.get("detail") or ""
-                    if proc.poll() is None and not any(
-                        m in last_detail for m in ("DevPwd_", "Error:", "Traceback")
-                    ):
-                        return waited
+                    proc_to_wait = proc
+
+            # Never call _wait_until_ready while holding self._lock — status() must stay responsive.
+            if proc_to_wait is not None:
+                waited = self._wait_until_ready(proc_to_wait, timeout_sec=180.0)
+                if waited.get("ok"):
+                    return {"ok": True, "local_port": port, "reused": False, "waited": True}
+                last_detail = waited.get("detail") or ""
+                if proc_to_wait.poll() is None and not any(
+                    m in last_detail for m in ("DevPwd_", "Error:", "Traceback")
+                ):
+                    return waited
 
             device_salt = _fetch_device_randsalt(serial)
             last_detail = ""

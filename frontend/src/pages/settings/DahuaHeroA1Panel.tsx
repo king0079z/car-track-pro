@@ -61,9 +61,11 @@ export const DahuaHeroA1Panel: React.FC<Props> = ({ compact = false, onUseAsSour
   const [cloudProbing, setCloudProbing] = useState(false);
   const [relayBusy, setRelayBusy] = useState(false);
   const [relayStatus, setRelayStatus] = useState<Record<string, unknown> | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
+    setLoadError(null);
     try {
       const res = await camerasApi.getHeroA1();
       const data = res.data as DahuaHeroA1Public;
@@ -73,12 +75,18 @@ export const DahuaHeroA1Panel: React.FC<Props> = ({ compact = false, onUseAsSour
       setPasswordSaved(Boolean(masked && masked !== ''));
     } catch (err: unknown) {
       const status = (err as { response?: { status?: number } })?.response?.status;
+      const isTimeout = (err as { code?: string })?.code === 'ECONNABORTED';
       if (status === 404) {
+        setLoadError('Camera API not available — restart deploy.cmd (backend may be stale after an update).');
         toast.error(
           'Camera API not available — close the backend window and run deploy.cmd again (stale server after update).',
           { duration: 6000 },
         );
+      } else if (isTimeout) {
+        setLoadError('Backend timed out — if cloud P2P is starting, switch to LAN mode or wait and retry.');
+        toast.error('Camera settings timed out — try Retry or use LAN (Same Wi-Fi) mode.', { duration: 5000 });
       } else {
+        setLoadError('Could not load camera settings — check backend and tunnel are running.');
         toast.error('Could not load Dahua camera settings');
       }
     } finally {
@@ -310,6 +318,19 @@ export const DahuaHeroA1Panel: React.FC<Props> = ({ compact = false, onUseAsSour
     return (
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: 16, color: 'var(--text-muted)', fontSize: 13 }}>
         <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} /> Loading camera profile…
+      </div>
+    );
+  }
+
+  if (loadError && !pub) {
+    return (
+      <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 10 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: '#f87171', fontSize: 13 }}>
+          <AlertCircle size={16} /> {loadError}
+        </div>
+        <button type="button" className="btn btn-secondary" onClick={() => void load()} style={{ alignSelf: 'flex-start' }}>
+          Retry
+        </button>
       </div>
     );
   }
