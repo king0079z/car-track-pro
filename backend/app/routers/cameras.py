@@ -117,13 +117,33 @@ def dahua_cloud_status() -> JSONResponse:
 @router.get("/dahua/hero-a1/live-source")
 def dahua_live_source_token() -> JSONResponse:
     """Default VisionFlow source token when DH-H3A is configured."""
-    from ..services.dahua_camera import default_dahua_live_token, resolve_dahua_source
+    from ..services.dahua_camera import (
+        _connection_mode,
+        _dahua_is_configured,
+        dahua_hero_a1_config,
+        default_dahua_live_token,
+    )
 
     token = default_dahua_live_token()
+    configured = token is not None
+    # Fast path only — do not call resolve_dahua_source() here (P2P can block 40–90s
+    # and breaks Vercel/Cloudflare tunnel clients with ERR_NETWORK / WS 1006).
+    rtsp_resolves = False
+    if configured:
+        cfg = dahua_hero_a1_config()
+        mode = _connection_mode(cfg)
+        if mode == "lan" and str(cfg.get("host") or "").strip():
+            rtsp_resolves = True
+        elif mode == "cartrack_relay" and str(cfg.get("cartrack_relay_view_url") or "").strip():
+            rtsp_resolves = True
+        elif mode in ("auto", "p2p") and str(cfg.get("host") or "").strip():
+            rtsp_resolves = True
+        elif _dahua_is_configured(cfg):
+            rtsp_resolves = True
     return JSONResponse({
         "token": token,
-        "configured": token is not None,
-        "rtsp_resolves": bool(resolve_dahua_source(token) if token else None),
+        "configured": configured,
+        "rtsp_resolves": rtsp_resolves,
     })
 
 
