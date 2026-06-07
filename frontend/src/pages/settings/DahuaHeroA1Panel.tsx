@@ -125,6 +125,10 @@ export const DahuaHeroA1Panel: React.FC<Props> = ({ compact = false, onUseAsSour
     if (loading || (form.connection_mode !== 'p2p' && form.connection_mode !== 'auto')) return;
     void refreshP2pStatus();
     if (form.device_serial?.trim()) void refreshCloudProbe();
+    const id = window.setInterval(() => {
+      void refreshP2pStatus();
+    }, 3000);
+    return () => window.clearInterval(id);
   }, [loading, form.connection_mode, form.device_serial, refreshP2pStatus, refreshCloudProbe]);
 
   const extractApiError = (err: unknown): string => {
@@ -147,6 +151,7 @@ export const DahuaHeroA1Panel: React.FC<Props> = ({ compact = false, onUseAsSour
         if (tunnel.running) return true;
         if (tunnel.phase === 'failed') return false;
         if (tunnel.last_error && String(tunnel.last_error).includes('Timeout occurred')) return false;
+        if (tunnel.last_error && String(tunnel.last_error).includes('PTCP')) return false;
       } catch {
         /* keep polling */
       }
@@ -157,21 +162,24 @@ export const DahuaHeroA1Panel: React.FC<Props> = ({ compact = false, onUseAsSour
 
   const startCloud = async () => {
     const pwd = (form.password || '').trim();
-    if (!pwd || pwd === '********') {
+    const useSavedPassword = passwordSaved && (!pwd || pwd === '********');
+    if (!useSavedPassword && (!pwd || pwd === '********')) {
       toast.error('Type the device password from DMSS, click Save camera, then Start cloud tunnel.', { duration: 8000 });
       return;
     }
     setP2pBusy(true);
     try {
       await camerasApi.updateHeroA1({
-        connection_mode: 'p2p',
+        connection_mode: form.connection_mode === 'auto' ? 'auto' : 'p2p',
         device_serial: form.device_serial,
         host: form.host,
         username: form.username,
-        password: pwd,
+        ...(useSavedPassword ? {} : { password: pwd }),
         enabled: form.enabled,
       });
-      const res = await camerasApi.p2pStart({ username: form.username, password: pwd });
+      const res = await camerasApi.p2pStart(
+        useSavedPassword ? { username: form.username } : { username: form.username, password: pwd },
+      );
       setP2pStatus(res.data.status as Record<string, unknown>);
       toast('Cloud tunnel starting — UDP setup can take up to 3 minutes…', { duration: 5000, icon: '⏳' });
       const ready = await pollCloudTunnel();
@@ -179,10 +187,14 @@ export const DahuaHeroA1Panel: React.FC<Props> = ({ compact = false, onUseAsSour
       if (ready) {
         toast.success('Cloud tunnel ready — click Test RTSP');
       } else {
+        const phase = String((p2pStatus as { phase?: string } | null)?.phase || '');
+        const hint = form.connection_mode === 'auto' && form.host
+          ? ` Cloud failed — Auto mode will use LAN at ${form.host} when you Test RTSP or start live ANPR.`
+          : ' On the same Wi-Fi, switch to Same Wi-Fi (LAN IP) or Auto mode.';
         toast.error(
-          'Cloud tunnel did not finish (UDP/STUN blocked or camera needs relay mode). '
-          + 'On the same Wi-Fi, switch to Same Wi-Fi (LAN IP) — your LAN test already works.',
-          { duration: 10000 },
+          (phase === 'failed' ? 'Cloud tunnel failed (UDP/PTCP blocked on this network).' : 'Cloud tunnel did not finish in time.')
+          + hint,
+          { duration: 12000 },
         );
       }
     } catch (err: unknown) {
@@ -231,7 +243,6 @@ export const DahuaHeroA1Panel: React.FC<Props> = ({ compact = false, onUseAsSour
     setTestResult(null);
     try {
       const res = await camerasApi.testHeroA1({
-        host: form.host,
         username: form.username,
         password: form.password || undefined,
         rtsp_port: form.rtsp_port,
@@ -385,6 +396,12 @@ export const DahuaHeroA1Panel: React.FC<Props> = ({ compact = false, onUseAsSour
         <input type="checkbox" checked={form.enabled} onChange={e => setForm(f => ({ ...f, enabled: e.target.checked }))} style={{ accentColor: '#3b82f6' }} />
         Enable {pub?.profile.model ?? 'Dahua'} camera for live ANPR
       </label>
+
+      {pub?.env_configured && (
+        <p style={{ margin: 0, fontSize: 11, color: '#10b981', lineHeight: 1.5 }}>
+          Cloud camera settings loaded from server environment (<code>DAHUA_*</code>) — Easy4IP P2P starts automatically on boot.
+        </p>
+      )}
 
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, fontSize: 13 }}>
         <span style={{ fontWeight: 600, color: 'var(--text-muted)', fontSize: 11, textTransform: 'uppercase', width: '100%' }}>

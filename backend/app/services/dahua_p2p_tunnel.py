@@ -29,6 +29,8 @@ _ERROR_MARKERS = (
     "DevPwd_InvalidDigest",
     "DevPwd_",
     "Timeout occurred",
+    "PTCP device sign timed out",
+    "PTCP sign response invalid",
     "Error:",
     "timed out",
     "Device requires authentication",
@@ -53,11 +55,12 @@ _SALT_TTL_SEC = 300.0
 class DahuaP2PTunnelManager:
     """One P2P tunnel subprocess per serial (Hero A1 / DH-H3A)."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, default_local_port: int = _DEFAULT_LOCAL_PORT) -> None:
         self._lock = threading.Lock()
         self._proc: subprocess.Popen | None = None
         self._serial: str = ""
-        self._local_port: int = _DEFAULT_LOCAL_PORT
+        self._local_port: int = int(default_local_port)
+        self._lan_fallback: str = ""
         self._last_error: str = ""
         self._started_at: float = 0.0
         self._p2p_ready = False
@@ -65,6 +68,8 @@ class DahuaP2PTunnelManager:
         self._reader_stop = threading.Event()
         self._ready_event = threading.Event()
         self._reader_thread: threading.Thread | None = None
+        # Per-manager start lock so multiple cameras' tunnels can start in parallel.
+        self._ensure_lock = threading.Lock()
 
     def status(self) -> dict[str, Any]:
         with self._lock:
@@ -116,6 +121,7 @@ class DahuaP2PTunnelManager:
         username: str,
         password: str,
         local_port: int = _DEFAULT_LOCAL_PORT,
+        lan_fallback: str = "",
     ) -> dict[str, Any]:
         """Start P2P setup in a background thread; poll ``status()`` until phase is ready or failed."""
         serial = (serial or "").strip().upper()
@@ -136,6 +142,7 @@ class DahuaP2PTunnelManager:
                     username=username,
                     password=password,
                     local_port=local_port,
+                    lan_fallback=lan_fallback,
                 )
             except Exception as exc:
                 _log.warning("Background P2P start failed: %s", exc)
@@ -151,6 +158,7 @@ class DahuaP2PTunnelManager:
         username: str,
         password: str,
         local_port: int = _DEFAULT_LOCAL_PORT,
+        lan_fallback: str = "",
     ) -> dict[str, Any]:
         """Start P2P tunnel; tries authenticated (dtype=1) then legacy (dtype=0)."""
         serial = (serial or "").strip().upper()
@@ -165,9 +173,11 @@ class DahuaP2PTunnelManager:
         if "@" in user:
             user = "admin"
         port = max(1024, min(65535, int(local_port)))
+        if lan_fallback:
+            self._lan_fallback = str(lan_fallback)
 
-        # Only one cloud tunnel start at a time (prewarm + UI + status must not kill each other).
-        with _ENSURE_LOCK:
+        # One start at a time per camera (prewarm + UI + status must not kill each other).
+        with self._ensure_lock:
             with self._lock:
                 if (
                     self._proc is not None
@@ -339,12 +349,15 @@ class DahuaP2PTunnelManager:
             else:
                 env.pop("P2P_DEVICE_RANDSALT", None)
             try:
-                from .dahua_camera import dahua_hero_a1_config
+                if self._lan_fallback:
+                    env["P2P_LAN_FALLBACK"] = self._lan_fallback
+                else:
+                    from .dahua_camera import dahua_hero_a1_config
 
-                lan_host = str(dahua_hero_a1_config().get("host") or "").strip()
-                lan_port = int(dahua_hero_a1_config().get("rtsp_port") or 554)
-                if lan_host:
-                    env["P2P_LAN_FALLBACK"] = f"{lan_host}:{lan_port}"
+                    lan_host = str(dahua_hero_a1_config().get("host") or "").strip()
+                    lan_port = int(dahua_hero_a1_config().get("rtsp_port") or 554)
+                    if lan_host:
+                        env["P2P_LAN_FALLBACK"] = f"{lan_host}:{lan_port}"
             except Exception:
                 pass
             try:
@@ -402,6 +415,8 @@ class DahuaP2PTunnelManager:
                         tail = "".join(self._stdout_tail[-8:]).strip()
                         if tail and not self._last_error:
                             self._last_error = tail[-400:]
+                        if not self._last_error:
+                            self._last_error = f"P2P process exited (code {proc.returncode})"
         except Exception as exc:
             with self._lock:
                 self._last_error = str(exc)
@@ -478,8 +493,8 @@ def prewarm_cloud_tunnel_async() -> None:
     threading.Thread(target=_run, name="dahua-p2p-prewarm", daemon=True).start()
 
 
-_manager: DahuaP2PTunnelManager | None = None
-_manager_lock = threading.Lock()
+_pool: dict[str, DahuaP2PTunnelManager] = {}
+_pool_lock = threading.Lock()
 
 
 def _fetch_device_randsalt(serial: str) -> str | None:
@@ -526,12 +541,36 @@ def _fetch_device_randsalt(serial: str) -> str | None:
         return None
 
 
-def get_p2p_tunnel_manager() -> DahuaP2PTunnelManager:
-    global _manager
-    with _manager_lock:
-        if _manager is None:
-            _manager = DahuaP2PTunnelManager()
-        return _manager
+def get_p2p_tunnel_manager(
+    serial: str | None = None,
+    *,
+    local_port: int = _DEFAULT_LOCAL_PORT,
+) -> DahuaP2PTunnelManager:
+    """Return the tunnel manager for a serial (one subprocess + port per camera).
+
+    With no serial, resolves the legacy hero-a1 camera's serial so the existing
+    ``/dahua/hero-a1/*`` endpoints and the new multi-camera pool share one
+    manager instance for that device.
+    """
+    key = (serial or "").strip().upper()
+    if not key:
+        try:
+            from .dahua_camera import dahua_hero_a1_config
+
+            key = str(dahua_hero_a1_config().get("device_serial") or "").strip().upper()
+        except Exception:
+            key = ""
+    with _pool_lock:
+        mgr = _pool.get(key)
+        if mgr is None:
+            mgr = DahuaP2PTunnelManager(default_local_port=local_port)
+            _pool[key] = mgr
+        return mgr
+
+
+def all_tunnel_managers() -> dict[str, DahuaP2PTunnelManager]:
+    with _pool_lock:
+        return dict(_pool)
 
 
 def _port_listening(port: int) -> bool:

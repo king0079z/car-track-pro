@@ -76,14 +76,32 @@ class Settings(BaseSettings):
     AUDIT_RUN_ON_STARTUP: bool = True  # first snapshot ~45s after boot so UI is not empty
     AUDIT_STARTUP_DELAY_SECONDS: int = 45
 
+    # ── Env-driven cloud camera (cloud/Hugging Face deploy, no on-site PC edits) ─
+    # Point a hosted deploy at ONE internet-reachable stream (a cloud relay's view
+    # URL, a public RTSP-over-TCP camera, or an HLS URL). When set, it surfaces as
+    # an always-enabled camera "cloud-rtsp" that the 24/7 supervisor auto-starts on
+    # boot — the turnkey way to run live ANPR on a server that can't reach a LAN
+    # camera or the Easy4IP P2P tunnel (e.g. Hugging Face Spaces).
+    LIVE_RTSP_URL: str = ""
+    LIVE_RTSP_NAME: str = "Cloud Camera"
+    LIVE_RTSP_SLOT: int = 0
+    LIVE_RTSP_METER_PER_PIXEL: float = 0.0
+
     # ── Live camera 24/7 operation ───────────────────────────────────────────
     LIVE_24_7_ENABLED: bool = True
     LIVE_AUTO_RECONNECT: bool = True
     LIVE_RECONNECT_BASE_SEC: float = 1.5
     LIVE_RECONNECT_MAX_SEC: float = 45.0
     LIVE_READ_FAIL_MAX: int = 20  # consecutive bad reads before reconnect attempt
+    LIVE_STALL_RECONNECT_SEC: float = 25.0  # seconds with no NEW decoded frame before forcing a reconnect (higher = more tolerant of slow Wi-Fi / CPU)
     LIVE_SEGMENT_MINUTES: int = 60  # rotate annotated MP4 every N minutes
     LIVE_SEGMENT_RETENTION_DAYS: int = 7  # delete old segment files automatically
+    LIVE_SEGMENT_MAX_GB: float = 10.0  # hard disk cap for ALL recorded media (segments + uploads + annotated); 0 = disabled, oldest purged first
+    # Uploaded source clips and annotated result videos are heavy and disposable:
+    # the extracted data (plates/speeds/times) is persisted in the databases, so
+    # these MP4s are auto-deleted once older than this window. Set 0 to disable.
+    ANALYSIS_MEDIA_RETENTION_HOURS: float = 12.0
+    LIVE_JOB_RETENTION: int = 64  # max finished/terminal in-memory job records kept before eviction
     LIVE_MEMORY_MAX_TRACKS: int = 1200  # prune exited track state beyond this count
     LIVE_MEMORY_PRUNE_EVERY_FRAMES: int = 500  # run prune during live every N processed frames
     LIVE_SUPERVISOR_INTERVAL_SEC: float = 20.0
@@ -91,12 +109,37 @@ class Settings(BaseSettings):
     LIVE_RESUME_ON_STARTUP: bool = False  # only open cameras after explicit Start (not on server boot)
     LIVE_PROBE_CAMERAS_ON_STARTUP: bool = False  # avoid opening USB webcams during init
     LIVE_STARTUP_DELAY_SEC: float = 8.0
-    LIVE_MAX_CAMERAS: int = 4  # multi-camera grid slots (0 .. N-1)
+    LIVE_MAX_CAMERAS: int = 16  # multi-camera grid slots (0 .. N-1)
     LIVE_GRID_RESUME_STAGGER_SEC: float = 12.0  # delay between auto-resume jobs (avoids USB fights)
+
+    # ── Multi-camera scale: shared inference + concurrency governor ──────────
+    # Share ONE OCR reader across all live cameras (OCR is the largest standalone
+    # memory consumer and is stateless). Massively cuts RAM/VRAM at 8-16 cameras.
+    LIVE_SHARED_OCR: bool = True
+    # Max concurrent heavy model inferences across ALL live feeds. Prevents 16
+    # camera threads thrashing one GPU/CPU. 0 = unlimited (legacy). Tune to GPU count.
+    INFERENCE_MAX_CONCURRENCY: int = 2
+
+    # ── Speed estimation accuracy (per-camera calibration + smoothing) ───────
+    # Median window (samples) for instantaneous speed; >1 removes single-frame spikes.
+    SPEED_WINDOW_SAMPLES: int = 5
 
     # CarTrack Cloud Relay (your VPS + MediaMTX) — optional env defaults for cameras.json
     CARTRACK_RELAY_PUBLISH_URL: str = ""  # edge PC pushes LAN stream here (rtsp://vps:8554/site/cam)
     CARTRACK_RELAY_VIEW_URL: str = ""  # cloud CarTrack pulls ANPR from here
+
+    # Dahua Hero / Easy4IP cloud (DMSS-style P2P, no on-site PC) — overrides cameras.json when set
+    DAHUA_ENABLED: bool = False
+    DAHUA_DEVICE_SERIAL: str = ""  # SN from device QR, e.g. BF0E4C7GAGB833C
+    DAHUA_PASSWORD: str = ""  # device password from DMSS (not DMSS email login)
+    DAHUA_USERNAME: str = "admin"
+    DAHUA_CONNECTION_MODE: str = "p2p"  # p2p | auto | lan | cartrack_relay
+    DAHUA_DEVICE_TYPE: str = ""  # optional, e.g. DH-H3A
+    DAHUA_HOST: str = ""  # optional LAN IP for auto mode fallback
+    DAHUA_STREAM: str = "sub"  # sub | main
+    DAHUA_P2P_LOCAL_PORT: int = 18554
+    # When serial+password env vars are set, auto-start Easy4IP tunnel on API boot
+    DAHUA_P2P_PREWARM_ON_STARTUP: bool = True
 
     @property
     def cors_origins(self) -> List[str]:

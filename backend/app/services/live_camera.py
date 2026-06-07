@@ -41,7 +41,8 @@ def normalize_live_source(source: str | None) -> str:
     """
     Map empty / friendly names to the default PC camera index ``0``.
     RTSP/HTTP URLs and numeric indices pass through unchanged.
-    Dahua Hero A1 aliases resolve to the configured RTSP URL.
+    Dahua Hero A1 aliases canonicalize to ``dahua-hero-a1`` without network I/O
+    (dedupe / supervisor keys must not trigger LAN or P2P probes at startup).
     """
     s = (source or "").strip()
     low = s.lower()
@@ -49,11 +50,13 @@ def normalize_live_source(source: str | None) -> str:
         return "0"
     if s.isdigit():
         return s
-    from .dahua_camera import resolve_dahua_source
+    from .dahua_camera import HERO_A1_PROFILE, dahua_id_from_source, is_dahua_alias
 
-    resolved = resolve_dahua_source(s)
-    if resolved:
-        return resolved
+    if is_dahua_alias(s):
+        cam_id = dahua_id_from_source(s)
+        if cam_id in (None, "hero-a1"):
+            return str(HERO_A1_PROFILE["default_source_token"])
+        return f"dahua://{cam_id}"
     return s
 
 
@@ -213,10 +216,23 @@ def open_usb_camera(index: int = 0, *, strict_index: bool = True) -> cv2.VideoCa
 
 def open_capture_for_live(source: str, *, strict_index: bool = True) -> cv2.VideoCapture:
     """Open a USB camera index or network stream (RTSP / HTTP)."""
-    from .dahua_camera import is_dahua_alias, open_dahua_stream, dahua_hero_a1_config
+    from .dahua_camera import (
+        dahua_hero_a1_config,
+        is_dahua_alias,
+        open_dahua_stream,
+        resolve_dahua_source,
+    )
 
     raw = (source or "").strip()
     s = normalize_live_source(source)
+    if is_dahua_alias(raw) or is_dahua_alias(s):
+        resolved = resolve_dahua_source(raw if is_dahua_alias(raw) else s)
+        if not resolved:
+            raise RuntimeError(
+                "Dahua camera is not reachable yet. Open Settings → Dahua camera, "
+                "start the cloud tunnel, or confirm LAN IP on the same Wi‑Fi."
+            )
+        s = resolved
     if s.isdigit():
         return open_usb_camera(int(s), strict_index=strict_index)
     if s.lower().startswith("rtsp://") or s.lower().startswith("rtsps://"):

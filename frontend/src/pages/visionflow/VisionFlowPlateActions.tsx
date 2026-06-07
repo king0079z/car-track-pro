@@ -66,7 +66,7 @@ export const PlateActionCard: React.FC<{
   pa: PlateAction;
   /** @deprecated Use work-order wizard navigation instead */
   onCreateVisit?: (pa: PlateAction, extra: { owner_name?: string; owner_phone?: string; assigned_bay?: number }) => void;
-}> = ({ pa, onCreateVisit }) => {
+}> = ({ pa }) => {
   const navigate = useNavigate();
   const [ownerName, setOwnerName] = useState('');
   const [ownerPhone, setOwnerPhone] = useState('');

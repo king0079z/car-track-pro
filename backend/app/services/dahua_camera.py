@@ -68,12 +68,54 @@ HERO_A1_PROFILE: dict[str, Any] = {
 }
 
 
+_LEGACY_HERO_IDS = frozenset({"hero-a1", "hero_a1", "hero", "dahua", ""})
+
+
 def is_dahua_alias(source: str | None) -> bool:
-    return (source or "").strip().lower() in HERO_A1_ALIASES
+    s = (source or "").strip().lower()
+    if s in HERO_A1_ALIASES:
+        return True
+    return s.startswith("dahua://") or s.startswith("dahua:")
+
+
+def dahua_id_from_source(source: str | None) -> str | None:
+    """Map a Dahua source token to a camera id (``dahua://<id>`` or legacy alias)."""
+    s = (source or "").strip()
+    low = s.lower()
+    if low in HERO_A1_ALIASES:
+        return "hero-a1"
+    if low.startswith("dahua://"):
+        cid = s[len("dahua://"):].strip()
+    elif low.startswith("dahua:"):
+        cid = s[len("dahua:"):].strip()
+    else:
+        return None
+    return "hero-a1" if cid.lower() in _LEGACY_HERO_IDS else cid
 
 
 def dahua_hero_a1_config() -> dict[str, Any]:
     return load_camera_config().get("dahua_hero_a1") or dict(DEFAULT_DAHUA_HERO_A1)
+
+
+def _camera_cfg_for_id(camera_id: str | None) -> dict[str, Any] | None:
+    """Resolve a registry camera (or the legacy hero-a1 profile) to a config dict.
+
+    The registry camera dict uses the same field names the resolution logic
+    expects (host, rtsp_port, username, password, stream, connection_mode,
+    device_serial, p2p_local_port), so it can be passed through directly.
+    """
+    cid = (camera_id or "hero-a1").strip()
+    try:
+        from .camera_config import get_camera
+
+        cam = get_camera(cid)
+        if cam:
+            return cam
+    except Exception:
+        pass
+    if cid == "hero-a1":
+        return dahua_hero_a1_config()
+    return None
 
 
 def hero_profile_for_config(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -243,14 +285,18 @@ def _try_cloud_tunnel_rtsp(
     serial = str(cfg.get("device_serial") or "").strip()
     if not serial or not password:
         return None
-    mgr = get_p2p_tunnel_manager()
+    local_port = int(cfg.get("p2p_local_port") or 18554)
+    mgr = get_p2p_tunnel_manager(serial, local_port=local_port)
+    lan_host = str(cfg.get("host") or "").strip()
+    lan_fallback = f"{lan_host}:{int(cfg.get('rtsp_port') or 554)}" if lan_host else ""
     st = mgr.status()
     if not st.get("running"):
         mgr.start_background(
             serial=serial,
             username=username,
             password=password,
-            local_port=int(cfg.get("p2p_local_port") or 18554),
+            local_port=local_port,
+            lan_fallback=lan_fallback,
         )
     deadline = time.monotonic() + max(5.0, float(wait_sec))
     while time.monotonic() < deadline:
@@ -292,12 +338,38 @@ def default_dahua_live_token() -> str | None:
     return None
 
 
+def source_for_camera(cam: dict[str, Any]) -> str:
+    """Live-engine source string for a registry camera.
+
+    Dahua cloud cameras use the ``dahua://<id>`` token (resolved lazily to a
+    tunnel/LAN RTSP URL); generic cameras use their RTSP URL directly.
+    """
+    if not isinstance(cam, dict):
+        return ""
+    cid = str(cam.get("id") or "").strip()
+    if str(cam.get("type")) == "dahua_p2p":
+        return f"dahua://{cid}" if cid and cid != "hero-a1" else "dahua-hero-a1"
+    url = str(cam.get("rtsp_url") or "").strip()
+    if url:
+        return url
+    host = str(cam.get("host") or "").strip()
+    if host:
+        return build_rtsp_url(
+            host=host,
+            username=str(cam.get("username") or "admin"),
+            password=str(cam.get("password") or ""),
+            rtsp_port=int(cam.get("rtsp_port") or 554),
+            stream=str(cam.get("stream") or "sub"),
+        )
+    return ""
+
+
 def resolve_dahua_source(source: str | None) -> str | None:
-    """Map friendly Dahua tokens to a concrete RTSP URL from saved config."""
+    """Map friendly Dahua tokens (legacy alias or ``dahua://<id>``) to a concrete RTSP URL."""
     if not is_dahua_alias(source):
         return None
-    cfg = dahua_hero_a1_config()
-    if not _dahua_is_configured(cfg):
+    cfg = _camera_cfg_for_id(dahua_id_from_source(source))
+    if not cfg or not _dahua_is_configured(cfg):
         return None
 
     username = str(cfg.get("username") or "admin")
@@ -487,6 +559,8 @@ def public_dahua_config() -> dict[str, Any]:
             "view_url": view or None,
             "relay": get_cartrack_relay_manager().status(),
         }
+    from .camera_config import dahua_env_active
+
     return {
         "profile": hero_profile_for_config(cfg),
         "config": masked,
@@ -496,6 +570,7 @@ def public_dahua_config() -> dict[str, Any]:
         "cloud": cloud,
         "cartrack_relay": cartrack_relay,
         "connection_mode": _connection_mode(cfg),
+        "env_configured": dahua_env_active(),
     }
 
 
@@ -879,6 +954,78 @@ def _local_ipv4_addresses() -> list[str]:
         except Exception:
             pass
     return sorted(addrs)
+
+
+def diagnose_connectivity(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Explain why cloud/LAN connect may fail — used by settings UI (no long probes)."""
+    cfg = cfg or dahua_hero_a1_config()
+    lan_host = str(cfg.get("host") or "").strip()
+    rtsp_port = int(cfg.get("rtsp_port") or 554)
+    pc_ips = _local_ipv4_addresses()
+    pc_subnets = {
+        ".".join(ip.split(".")[:3])
+        for ip in pc_ips
+        if ip.count(".") == 3 and not ip.startswith("127.")
+    }
+    cam_subnet = ".".join(lan_host.split(".")[:3]) if lan_host.count(".") == 3 else ""
+    subnet_mismatch = bool(
+        cam_subnet and cam_subnet not in pc_subnets and not lan_host.startswith("127.")
+    )
+
+    rtsp_reachable = False
+    rtsp_error: str | None = None
+    if lan_host and not lan_host.startswith("127."):
+        try:
+            with socket.create_connection((lan_host, rtsp_port), timeout=3.0):
+                rtsp_reachable = True
+        except OSError as exc:
+            rtsp_error = str(exc)
+
+    tunnel: dict[str, Any] = {}
+    try:
+        from .dahua_p2p_tunnel import get_p2p_tunnel_manager
+
+        tunnel = get_p2p_tunnel_manager().status()
+    except Exception:
+        pass
+
+    last_err = str(tunnel.get("last_error") or "")
+    ptcp_blocked = "PTCP" in last_err or "ptcp" in last_err.lower()
+    tunnel_running = bool(tunnel.get("running"))
+
+    fixes: list[str] = []
+    if subnet_mismatch:
+        fixes.append(
+            f"Your PC is on {', '.join(pc_ips) or 'unknown'} but the camera IP is {lan_host}. "
+            "Connect this PC to the same Wi‑Fi as the camera, open DMSS → Device info, "
+            "copy the new IP into LAN IP (fallback), then try again."
+        )
+    elif lan_host and not rtsp_reachable and not subnet_mismatch:
+        fixes.append(
+            f"Camera at {lan_host}:{rtsp_port} is not reachable from this PC "
+            f"({rtsp_error or 'timeout'}). Confirm IP in DMSS or use Scan network below."
+        )
+    if not tunnel_running and (ptcp_blocked or str(tunnel.get("phase") or "") in ("failed", "auth")):
+        fixes.append(
+            "Cloud video tunnel did not finish (UDP/PTCP blocked on many home/office networks). "
+            "LAN on the same Wi‑Fi is the most reliable fix; DMSS on your phone may still work."
+        )
+    if not fixes:
+        fixes.append(
+            "Re-enter the device password from DMSS (not your email login, not the QR security code)."
+        )
+
+    return {
+        "pc_ips": pc_ips,
+        "camera_host": lan_host,
+        "subnet_mismatch": subnet_mismatch,
+        "lan_rtsp_reachable": rtsp_reachable,
+        "lan_rtsp_error": rtsp_error,
+        "cloud_tunnel_running": tunnel_running,
+        "cloud_tunnel_phase": tunnel.get("phase"),
+        "cloud_tunnel_message": tunnel.get("phase_message"),
+        "fixes": fixes,
+    }
 
 
 def _is_scan_worthy_ipv4(ip: str) -> bool:

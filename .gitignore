@@ -4,9 +4,12 @@ backend/.env.*
 frontend/.env
 frontend/.env.local
 frontend/.env.production.local
+deploy/cloud/.env.cloud
+deploy/cloud/data/
 backend/cameras.json
 scripts/.tunnel-url.txt
 scripts/cloudflared.exe
+scripts/.env.deploy.local
 
 # Python
 backend/venv/
@@ -48,3 +51,13 @@ Thumbs.db
 # Build artifacts
 *.pt
 !backend/models/.gitkeep
+
+# Training / dataset artifacts (footage-derived)
+backend/training/ocr_dataset/
+backend/runs/
+
+# Reverse-engineering / APK analysis scratch (heavy, disposable)
+.apk-analysis/
+*.apk
+
+.vercel

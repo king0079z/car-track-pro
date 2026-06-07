@@ -1,0 +1,35 @@
+# MediaMTX config for CarTrack Cloud Relay (runs on your VPS).
+# The site PC publishes:  rtsp://USER:PASS@<vps-ip>:8554/hero-a1
+# Remote CarTrack reads:   rtsp://USER:PASS@<vps-ip>:8554/hero-a1
+#
+# Change the username/password below before exposing the VPS to the internet.
+
+logLevel: info
+logDestinations: [stdout]
+
+# RTSP server (TCP + UDP). Open 8554/tcp and 8000/udp on the VPS firewall.
+rtsp: yes
+rtspAddress: :8554
+rtspTransports: [tcp, udp]
+
+# Optional: HLS for browser preview at http://<vps-ip>:8888/hero-a1
+hls: yes
+hlsAddress: :8888
+
+# Optional: WebRTC low-latency browser view at http://<vps-ip>:8889/hero-a1
+webrtc: yes
+webrtcAddress: :8889
+
+# Require auth for publish + read (set strong values).
+authMethod: internal
+authInternalUsers:
+  - user: cartrack
+    pass: CHANGE_ME_STRONG_PASSWORD
+    permissions:
+      - action: publish
+      - action: read
+
+paths:
+  hero-a1:
+    # Stream is pushed by the site PC; nothing to pull on the server side.
+    source: publisher

@@ -92,7 +92,7 @@ export const PlateTrackStatusBadge: React.FC<{
   if (resumeEligible) {
     return (
       <span
-        title="Left frame — will resume Live if same plate returns within 2 hours"
+        title="Left camera view (e.g. moved to another bay) — keeps waiting; resumes the in-shop timer if the same plate returns within the configured waiting period, otherwise becomes Done"
         style={{
           fontSize: compact ? 9 : 9.5,
           fontWeight: 700,

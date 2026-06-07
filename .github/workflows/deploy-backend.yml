@@ -1,0 +1,58 @@
+name: Deploy app to VM
+
+# World-class auto-deploy: every push to main rebuilds and restarts the WHOLE
+# all-in-one app (React frontend + FastAPI backend + ANPR + camera tunnel) on
+# your VM (Oracle Cloud Always Free / Azure / AWS — any Ubuntu host).
+#
+# One-time setup — add these in GitHub → Settings → Secrets and variables → Actions:
+#   DEPLOY_HOST       public IP or domain of the VM        (e.g. mycam.duckdns.org)
+#   DEPLOY_USER       SSH user                             (e.g. ubuntu  / opc for Oracle)
+#   DEPLOY_SSH_KEY    the PRIVATE SSH key (full contents) that can log into the VM
+#   DEPLOY_PATH       absolute path to the cloned repo on the VM
+#                       (e.g. /home/ubuntu/Car Tracking system)
+#   CADDY_DOMAIN      the HTTPS domain Caddy serves         (e.g. mycam.duckdns.org)
+#
+# After that, every code change you push is deployed automatically. You can also
+# trigger a deploy by hand from the Actions tab (workflow_dispatch).
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - "backend/**"
+      - "frontend/**"
+      - "deploy/cloud/**"
+      - ".github/workflows/deploy-backend.yml"
+  workflow_dispatch: {}
+
+concurrency:
+  group: deploy-backend
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          command_timeout: 30m
+          script: |
+            set -euo pipefail
+            cd "${{ secrets.DEPLOY_PATH }}"
+            echo "==> Pulling latest code"
+            git fetch --all --prune
+            git reset --hard origin/${{ github.ref_name }}
+            cd deploy/cloud
+            export CADDY_DOMAIN="${{ secrets.CADDY_DOMAIN }}"
+            echo "==> Rebuilding & restarting containers"
+            docker compose -f docker-compose.oracle.yml up -d --build --remove-orphans
+            echo "==> Pruning old images"
+            docker image prune -f || true
+            echo "==> Health check"
+            sleep 8
+            curl -fsS "https://${CADDY_DOMAIN}/api/health" || curl -fsS "http://localhost:8000/api/health"
+            echo "==> Deploy complete"

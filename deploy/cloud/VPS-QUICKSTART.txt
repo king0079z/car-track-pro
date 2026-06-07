@@ -1,0 +1,77 @@
+CarTrack — Hetzner VPS quickstart (24/7 ANPR, DMSS-style P2P)
+==============================================================
+
+YOUR SETUP (pre-configured in this repo)
+  VPS IP    : 46.225.26.2
+  Domain    : cartrackpro.duckdns.org
+  GitHub    : https://github.com/king0079z/car-track-pro.git
+  Camera    : Dahua Hero A1 (serial BF0E4C7GAGB833C in env template)
+
+  Camera → Dahua Easy4IP cloud → VPS pulls stream (same as DMSS). No on-site PC.
+
+
+OPTION A — ONE COMMAND FROM YOUR PC (recommended)
+------------------------------------------------
+1. Open PowerShell on your PC.
+
+2. Run (replace YOUR_DUCKDNS_TOKEN with the token from duckdns.org top of page):
+
+   cd "C:\Users\Mohamed\Desktop\Car Tracking system1\scripts"
+   .\deploy-to-hetzner.ps1 -DuckDnsToken "YOUR_DUCKDNS_TOKEN"
+
+3. Enter your Dahua camera admin password when prompted (DMSS device password).
+
+4. Wait ~10-15 minutes for Docker build.
+
+5. Open https://cartrackpro.duckdns.org  (login: admin / demo1234)
+
+
+OPTION B — MANUAL (if the script fails)
+---------------------------------------
+A) From your PC — copy weights:
+   scp "C:\Users\Mohamed\Desktop\Car Tracking system1\backend\models\best.pt" root@46.225.26.2:/root/best.pt
+
+B) SSH into VPS:
+   ssh root@46.225.26.2
+
+C) On the VPS:
+   curl -fsSL https://raw.githubusercontent.com/king0079z/car-track-pro/main/deploy/cloud/bootstrap-vps.sh -o /root/bootstrap-vps.sh
+   chmod +x /root/bootstrap-vps.sh
+   sudo bash /root/bootstrap-vps.sh cartrackpro.duckdns.org YOUR_DUCKDNS_TOKEN YOUR_CAMERA_PASSWORD
+
+   (If curl 404, clone the repo instead:)
+   git clone https://github.com/king0079z/car-track-pro.git /opt/cartrack
+   cd /opt/cartrack/deploy/cloud
+   cp /root/best.pt data/models/
+   cp env.cartrackpro.template .env.cloud
+   sudo bash setup-oracle.sh cartrackpro.duckdns.org YOUR_DUCKDNS_TOKEN
+
+
+VERIFY
+------
+  curl https://cartrackpro.duckdns.org/api/health
+
+  cd /opt/cartrack/deploy/cloud
+  docker compose -f docker-compose.oracle.yml logs -f backend
+
+  Look for:
+    - "Dahua cloud camera configured"
+    - P2P "Ready to connect"
+    - "Camera provisioner: started 1/1 enabled camera(s)"
+
+
+TROUBLESHOOTING
+---------------
+| Problem | Fix |
+|---------|-----|
+| SSH refused | Hetzner firewall: allow 22. Wait 1 min after create. |
+| HTTPS not loading | Wait 60s for Let's Encrypt. Check ports 80/443 open. |
+| P2P timeout | Confirm DAHUA_DEVICE_SERIAL in .env.cloud matches DMSS → Device info. |
+| Wrong camera password | Edit /opt/cartrack/deploy/cloud/.env.cloud then: docker compose -f docker-compose.oracle.yml up -d --build |
+| ANPR no weights | scp best.pt to /root/best.pt, re-run bootstrap |
+| Site loads, no live feed | Settings → Cameras → hero-a1 → Connect, or check backend logs |
+
+FILES (do not commit secrets)
+  deploy/cloud/.env.cloud          — live secrets (git-ignored)
+  deploy/cloud/env.cartrackpro.template — safe template (in git)
+  deploy/cloud/data/models/best.pt — YOLO weights (git-ignored, copy once)

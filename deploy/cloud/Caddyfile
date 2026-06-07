@@ -1,0 +1,16 @@
+# Automatic HTTPS for the CarTrack cloud backend.
+# CADDY_DOMAIN is injected from the environment (e.g. yourname.duckdns.org).
+# Caddy gets a free Let's Encrypt certificate automatically on first boot,
+# so the Vercel frontend can call this backend over https:// (and wss://).
+
+{$CADDY_DOMAIN} {
+	encode gzip
+
+	# Forward everything (REST + WebSocket) to the FastAPI backend.
+	reverse_proxy backend:8000 {
+		# Preserve client info and allow long-lived WebSocket/live-stream connections.
+		header_up Host {host}
+		header_up X-Real-IP {remote_host}
+		flush_interval -1
+	}
+}

@@ -317,7 +317,7 @@ export const VisitsList: React.FC = () => {
       const dateMatch = !range || isWithinInterval(new Date(v.entry_time), range);
       return textMatch && dateMatch;
     });
-  }, [visits, search, dateFilter, getDateRange]);
+  }, [visits, search, getDateRange]);
 
   const counts = useMemo(() => (visits as Visit[]).reduce((acc, v) => {
     acc[v.status] = (acc[v.status] || 0) + 1;

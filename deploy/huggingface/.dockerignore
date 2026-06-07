@@ -1,0 +1,39 @@
+# Build-context excludes for the Hugging Face Space (context = Space repo root).
+# Keeps the image slim and the build fast — weights in backend/models/*.pt are
+# intentionally NOT excluded (they're needed for ANPR).
+
+# Python virtualenvs / caches
+**/venv
+**/.venv
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.ruff_cache
+**/.mypy_cache
+
+# Node (frontend deps are reinstalled in the build stage)
+frontend/node_modules
+frontend/dist
+**/.vite
+
+# Local runtime data / media — never ship these (large + ephemeral)
+backend/uploads
+backend/outputs
+backend/runs
+backend/training/ocr_dataset
+**/*.mp4
+**/*.avi
+**/*.mov
+**/*.mkv
+
+# Local databases (the Space starts fresh; HF has no persistent disk on free)
+**/*.db
+**/*.db-shm
+**/*.db-wal
+
+# Misc
+.git
+.github
+.apk-analysis
+deploy/cloud
+**/*.log

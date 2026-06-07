@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import shutil
+import subprocess
 import threading
 import time
 import uuid
@@ -32,6 +34,8 @@ class LiveSupervisor:
         self._started = False
         self._started_session_ids: set[str] = set()
         self._lock = threading.Lock()
+        self._last_restart_at: dict[str, float] = {}
+        self._last_git_maint_at: float = 0.0
 
     def bind(
         self,
@@ -155,6 +159,8 @@ class LiveSupervisor:
             try:
                 self._watch_sessions()
                 self._purge_old_segments()
+                self._purge_old_analysis_media()
+                self._run_git_maintenance()
             except Exception:
                 _log.exception("Live supervisor tick failed")
 
@@ -274,11 +280,18 @@ class LiveSupervisor:
 
     def _restart_session(self, sess: dict[str, Any], *, stop_job_id: str | None = None) -> None:
         assert self._db_path is not None
+        sid = str(sess["session_id"])
+        # Debounce restart storms: a permanently-down camera must not be relaunched
+        # every tick (the in-job reconnect loop already handles transient outages).
+        now_m = time.monotonic()
+        min_interval = max(10.0, float(settings.LIVE_STALE_FRAME_SEC) / 3.0)
+        if now_m - self._last_restart_at.get(sid, 0.0) < min_interval:
+            return
+        self._last_restart_at[sid] = now_m
         if stop_job_id:
             self._request_stop(stop_job_id)
             time.sleep(2.0)
         new_job = uuid.uuid4().hex
-        sid = sess["session_id"]
         persist.set_session_job(self._db_path, sid, new_job)
         self._submit(
             sid,
@@ -326,6 +339,104 @@ class LiveSupervisor:
             try:
                 if d.is_dir() and not any(d.iterdir()):
                     d.rmdir()
+            except Exception:
+                pass
+        self._enforce_segment_disk_cap()
+
+    def _purge_old_analysis_media(self) -> None:
+        """Delete heavy disposable MP4s (uploaded source clips + annotated result
+        videos) once older than the retention window. The extracted data and config
+        live in the databases, so only the bulky media is removed."""
+        if self._output_dir is None:
+            return
+        hours = float(getattr(settings, "ANALYSIS_MEDIA_RETENTION_HOURS", 0.0) or 0.0)
+        if hours <= 0:
+            return
+        cutoff = datetime.now(UTC) - timedelta(hours=hours)
+        now_ts = time.time()
+        # Annotated/result videos sit at the root of outputs/ (live DVR segments
+        # live in *_live/ subdirs and are handled by _purge_old_segments).
+        targets = list(self._output_dir.glob("*.mp4"))
+        uploads_dir = self._output_dir.parent / "uploads"
+        if uploads_dir.is_dir():
+            targets += list(uploads_dir.glob("*.mp4"))
+        for f in targets:
+            try:
+                st = f.stat()
+                # Skip a file that is still being written / actively analysed.
+                if now_ts - st.st_mtime < 120.0:
+                    continue
+                if datetime.fromtimestamp(st.st_mtime, tz=UTC) < cutoff:
+                    f.unlink(missing_ok=True)
+                    _log.info("Purged old analysis media: %s", f.name)
+            except Exception:
+                pass
+
+    def _run_git_maintenance(self) -> None:
+        """Keep the .git directory from re-bloating. Runs at most once/day and uses
+        ``git gc --auto`` (a no-op unless Git's own thresholds are exceeded), so it
+        never disturbs working files, commit history, or the stored data."""
+        if self._output_dir is None:
+            return
+        now = time.time()
+        if now - self._last_git_maint_at < 86400.0:  # once per 24h
+            return
+        repo_root = self._output_dir.parent.parent  # backend/outputs -> project root
+        if not (repo_root / ".git").is_dir():
+            self._last_git_maint_at = now
+            return
+        git_bin = shutil.which("git")
+        if not git_bin:
+            self._last_git_maint_at = now
+            return
+        self._last_git_maint_at = now
+        try:
+            subprocess.run(
+                [git_bin, "-C", str(repo_root), "gc", "--auto", "--quiet"],
+                capture_output=True, timeout=300, check=False,
+            )
+        except Exception:
+            pass
+
+    def _enforce_segment_disk_cap(self) -> None:
+        """Hard cap on total recorded-media size (live segments + uploaded clips +
+        annotated outputs); purge oldest first when exceeded."""
+        if self._output_dir is None:
+            return
+        cap_gb = float(getattr(settings, "LIVE_SEGMENT_MAX_GB", 0.0) or 0.0)
+        if cap_gb <= 0:
+            return
+        cap_bytes = int(cap_gb * (1024 ** 3))
+        now_ts = time.time()
+        segs: list[tuple[float, int, Path]] = []
+        total = 0
+        media_paths = list(self._output_dir.rglob("*.mp4"))
+        uploads_dir = self._output_dir.parent / "uploads"
+        if uploads_dir.is_dir():
+            media_paths += list(uploads_dir.glob("*.mp4"))
+        for seg in media_paths:
+            try:
+                st = seg.stat()
+            except Exception:
+                continue
+            segs.append((st.st_mtime, st.st_size, seg))
+            total += st.st_size
+        if total <= cap_bytes:
+            return
+        segs.sort(key=lambda t: t[0])  # oldest first
+        for mtime, size, seg in segs:
+            if total <= cap_bytes:
+                break
+            # Never delete a segment that is likely still being written (the active file).
+            if now_ts - mtime < 120.0:
+                continue
+            try:
+                seg.unlink(missing_ok=True)
+                total -= size
+                _log.warning(
+                    "Segment disk cap (%.0f GB) exceeded; purged %s (%.1f MB)",
+                    cap_gb, seg.name, size / 1e6,
+                )
             except Exception:
                 pass
 

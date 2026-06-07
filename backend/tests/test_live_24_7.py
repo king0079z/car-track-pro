@@ -87,6 +87,7 @@ def test_speed_estimator_prune_memory():
     est._completed_rows = []
     est.spd = {}
     est._spd_ema = {}
+    est._spd_samples = {}
     est._speed_sum = {}
     est._speed_count = {}
     est._last_ocr_text = {}

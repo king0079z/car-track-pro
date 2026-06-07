@@ -9,7 +9,10 @@ from app.services.visionflow_engine import (
 
 
 def test_min_plate_area_scales_with_frame():
-    assert _min_plate_area_for_frame(540, 960) >= 1400
+    # Larger frames demand a larger minimum plate area (scales with frame area)...
+    assert _min_plate_area_for_frame(1080, 1920) > _min_plate_area_for_frame(540, 960)
+    # ...but never drops below the small-frame floor.
+    assert _min_plate_area_for_frame(540, 960) >= 450
 
 
 def test_filter_tiny_boxes_drops_phone_ui_fragment():

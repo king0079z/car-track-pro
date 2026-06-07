@@ -1,0 +1,75 @@
+version: "3.9"
+
+# ── CarTrack CLOUD backend (DMSS-style, no on-site PC) ───────────────────────
+# Runs the FastAPI backend + Easy4IP P2P client on a cloud VM, behind Caddy for
+# automatic HTTPS so the Vercel frontend can call it without mixed-content errors.
+#
+# Usage on the VM (Ubuntu):
+#   1) cp .env.cloud.example .env.cloud   &&   edit .env.cloud  (serial, password, domain, vercel url)
+#   2) export CADDY_DOMAIN=yourname.duckdns.org
+#   3) docker compose -f docker-compose.cloud.yml up -d --build
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+  backend:
+    build:
+      context: ../../backend
+      dockerfile: Dockerfile
+    container_name: cartrack_cloud_backend
+    restart: always
+    env_file:
+      - .env.cloud
+    environment:
+      PORT: "8000"
+    expose:
+      - "8000"
+    volumes:
+      - uploads_data:/app/uploads
+      - outputs_data:/app/outputs
+      # Persist the multi-camera registry + databases across redeploys.
+      # setup-cloud-vm.sh pre-creates these files under ./data before first boot.
+      - ./data/cameras.json:/app/cameras.json
+      - ./data/cartrack.db:/app/cartrack.db
+      - ./data/live_sessions.db:/app/live_sessions.db
+      - ./data/analysis_history.db:/app/analysis_history.db
+    networks:
+      - cartrack_net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; urllib.request.urlopen('http://localhost:8000/api/health'); " ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+
+  # Automatic HTTPS reverse proxy (Let's Encrypt) → backend:8000
+  caddy:
+    image: caddy:2-alpine
+    container_name: cartrack_cloud_caddy
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      CADDY_DOMAIN: ${CADDY_DOMAIN:?Set CADDY_DOMAIN to your DuckDNS/host domain}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - backend
+    networks:
+      - cartrack_net
+
+volumes:
+  uploads_data:
+    driver: local
+  outputs_data:
+    driver: local
+  caddy_data:
+    driver: local
+  caddy_config:
+    driver: local
+
+networks:
+  cartrack_net:
+    driver: bridge

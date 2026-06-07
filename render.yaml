@@ -18,7 +18,7 @@ services:
       - key: DEBUG
         value: "false"
       - key: ALLOWED_ORIGINS
-        sync: false
+        value: "https://cartrackpro.duckdns.org,https://frontend-delta-amber-41.vercel.app"
       - key: LIVE_RESUME_ON_STARTUP
         value: "false"
       - key: LIVE_PROBE_CAMERAS_ON_STARTUP
@@ -27,3 +27,12 @@ services:
         value: "false"
       - key: USE_GPU
         value: "false"
+      # Dahua Easy4IP cloud (DMSS-style, no on-site PC) — set on VPS, not Vercel
+      - key: DAHUA_DEVICE_SERIAL
+        sync: false
+      - key: DAHUA_PASSWORD
+        sync: false
+      - key: DAHUA_CONNECTION_MODE
+        value: "p2p"
+      - key: DAHUA_P2P_PREWARM_ON_STARTUP
+        value: "true"

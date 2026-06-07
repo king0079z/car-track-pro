@@ -17,7 +17,7 @@ from pathlib import Path
 
 import cv2
 from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 
 from ..database import SessionLocal
 from ..services import analysis_history as hist
@@ -49,6 +49,32 @@ _preview_lock = threading.Lock()
 _preview_jpeg: dict[str, bytes] = {}
 _live_stop_events: dict[str, threading.Event] = {}
 _live_threads: dict[str, threading.Thread] = {}
+
+
+def _evict_finished_jobs() -> None:
+    """Cap retained terminal (done/error) job records so _jobs can't grow forever.
+
+    Running/queued jobs are never evicted. dict preserves insertion order, so the
+    oldest finished jobs are dropped first along with their preview/stop-event state.
+    """
+    keep = max(8, int(getattr(settings, "LIVE_JOB_RETENTION", 64)))
+    victims: list[str] = []
+    with _jobs_lock:
+        terminal = [
+            jid for jid, j in _jobs.items()
+            if str(j.get("status") or "") in ("done", "error")
+        ]
+        excess = len(terminal) - keep
+        if excess > 0:
+            victims = terminal[:excess]
+            for jid in victims:
+                _jobs.pop(jid, None)
+                _live_stop_events.pop(jid, None)
+                _live_threads.pop(jid, None)
+    if victims:
+        with _preview_lock:
+            for jid in victims:
+                _preview_jpeg.pop(jid, None)
 
 
 def _stop_usb_webcam_live_jobs(keep_job_id: str | None = None) -> None:
@@ -771,6 +797,7 @@ def _enqueue_live_job(
             "live_health": {},
         }
     _persist_job(job_id)
+    _evict_finished_jobs()
     if stop_scope == "all":
         _stop_other_live_jobs(keep_job_id=job_id)
     else:
@@ -933,6 +960,7 @@ async def analyze_upload(
             "analyze_options": opts_saved,
         }
     _persist_job(job_id)
+    _evict_finished_jobs()
 
     _executor.submit(_run_job, job_id, in_path, out_path, opts)
     return JSONResponse({"job_id": job_id})
@@ -1313,12 +1341,20 @@ async def grid_stop_all() -> JSONResponse:
             continue
         if sess.get("session_id"):
             get_live_supervisor().disable(str(sess["session_id"]))
+        persist.disable_sessions_for_slot(LIVE_SESSIONS_DB, slot)
         jid = sess.get("job_id")
         if jid:
             ev = _live_stop_events.get(jid)
             if ev is not None:
                 ev.set()
                 n += 1
+            with _jobs_lock:
+                j = _jobs.get(jid)
+                if j is not None and j.get("status") in ("queued", "running"):
+                    j["status"] = "done"
+                    j["message"] = "Live feeds stopped."
+            with _preview_lock:
+                _preview_jpeg.pop(jid, None)
     return JSONResponse({"ok": True, "stopped": n})
 
 
@@ -1379,17 +1415,65 @@ async def list_local_cameras(max_index: int = Query(4, ge=1, le=8)) -> JSONRespo
 
 @router.get("/live/health")
 async def live_health() -> JSONResponse:
-    """Aggregate health for all active live sessions."""
+    """Aggregate + per-feed health for all active live sessions.
+
+    Each feed reports last-frame age and a `healthy` flag so the UI / monitoring can
+    tell a genuinely-live camera from a stalled or reconnecting one at a glance.
+    """
     sessions = get_live_supervisor().list_sessions(enabled_only=True)
-    live_jobs = []
+    stale_sec = max(30.0, float(settings.LIVE_STALE_FRAME_SEC))
+    now = datetime.now(UTC)
+
+    feeds: list[dict] = []
     with _jobs_lock:
-        for j in _jobs.values():
-            if j.get("is_live") and j.get("status") == "running":
-                live_jobs.append(j)
+        running = [
+            (jid, dict(j)) for jid, j in _jobs.items()
+            if j.get("is_live") and j.get("status") == "running"
+        ]
+
+    healthy_count = 0
+    stale_count = 0
+    for jid, j in running:
+        health = j.get("live_health") or {}
+        age_sec: float | None = None
+        last_at = health.get("last_frame_at")
+        if last_at:
+            try:
+                last_dt = datetime.fromisoformat(str(last_at).replace("Z", "+00:00"))
+                if last_dt.tzinfo is None:
+                    last_dt = last_dt.replace(tzinfo=UTC)
+                age_sec = round((now - last_dt).total_seconds(), 1)
+            except Exception:
+                age_sec = None
+        # No frame yet (warming up) is treated as not-yet-stale.
+        healthy = age_sec is not None and age_sec <= stale_sec
+        if healthy:
+            healthy_count += 1
+        elif age_sec is not None:
+            stale_count += 1
+        feeds.append({
+            "job_id": jid,
+            "session_id": j.get("session_id"),
+            "slot_index": j.get("slot_index"),
+            "label": j.get("input_name"),
+            "always_on": bool(j.get("always_on")),
+            "processed_frames": int(j.get("processed_frames") or 0),
+            "last_frame_age_sec": age_sec,
+            "reconnect_count": health.get("reconnect_count"),
+            "stream_connected": health.get("stream_connected"),
+            "uptime_sec": health.get("uptime_sec"),
+            "message": health.get("message") or j.get("message"),
+            "healthy": healthy,
+        })
+
     return JSONResponse({
         "live_24_7_enabled": settings.LIVE_24_7_ENABLED,
-        "active_live_jobs": len(live_jobs),
+        "active_live_jobs": len(feeds),
+        "healthy_feeds": healthy_count,
+        "stale_feeds": stale_count,
         "always_on_sessions": len(sessions),
+        "stale_threshold_sec": stale_sec,
+        "feeds": feeds,
         "sessions": sessions,
     })
 
@@ -1405,6 +1489,44 @@ async def job_snapshot(job_id: str) -> Response:
         # Job exists but models/frames aren't ready yet — 204 avoids noisy 404 polling in devtools.
         return Response(status_code=204)
     return Response(content=data, media_type="image/jpeg")
+
+
+@router.get("/jobs/{job_id}/stream.mjpg")
+async def job_stream(job_id: str) -> StreamingResponse:
+    """Push-based MJPEG preview (one persistent connection) instead of JPEG polling.
+
+    Scales far better than per-panel polling at many cameras. The client can simply
+    point an <img> tag at this URL. Ends when the job stops or the feed goes idle.
+    """
+    import asyncio
+
+    with _jobs_lock:
+        if job_id not in _jobs:
+            raise HTTPException(status_code=404, detail="Unknown job")
+
+    async def _gen():
+        last: bytes | None = None
+        idle_ticks = 0
+        while True:
+            with _jobs_lock:
+                j = _jobs.get(job_id)
+            if j is None or str(j.get("status") or "") not in ("queued", "running"):
+                break
+            with _preview_lock:
+                data = _preview_jpeg.get(job_id)
+            if data is not None and data is not last:
+                last = data
+                idle_ticks = 0
+                yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + data + b"\r\n")
+            else:
+                idle_ticks += 1
+                if idle_ticks > 600:  # ~60s with no new frame → close the stream
+                    break
+            await asyncio.sleep(0.1)
+
+    return StreamingResponse(
+        _gen(), media_type="multipart/x-mixed-replace; boundary=frame"
+    )
 
 
 @router.get("/jobs/{job_id}")

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
 import {
   LayoutDashboard, Car, ClipboardList, BarChart3, Gauge,
@@ -33,7 +33,7 @@ const navAdmin: {
 export const Sidebar: React.FC = () => {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
-  const { theme, toggle, isDark } = useTheme();
+  const { toggle, isDark } = useTheme();
   const isAdmin = ['admin', 'manager'].includes(user?.role || '');
 
   return (

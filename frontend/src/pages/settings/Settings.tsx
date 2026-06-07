@@ -23,10 +23,14 @@ import {
   Radar,
   Bell,
   Bug,
+  Cloud,
+  Video,
 } from 'lucide-react';
 import { api, settingsApi } from '../../services/api';
 import { SettingsErrorLog } from './SettingsErrorLog';
 import { DahuaHeroA1Panel } from './DahuaHeroA1Panel';
+import { DahuaCloudConnect } from './DahuaCloudConnect';
+import { CamerasManager } from './CamerasManager';
 import { qatarYmd, syncClientTimeFromPublicSettings } from '../../lib/qatarTime';
 import toast from 'react-hot-toast';
 
@@ -42,6 +46,8 @@ const SECTIONS: SettingsSection[] = [
   { id: 'operations', label: 'Operations', icon: Clock, hint: 'Bays, hours, dwell policies' },
   { id: 'revenue', label: 'Revenue', icon: DollarSign, hint: 'Tax display and staff visibility' },
   { id: 'notifications', label: 'Notifications', icon: Bell, hint: 'Alerts and reporting recipients' },
+  { id: 'cameras', label: 'Cameras', icon: Video, hint: 'Add and manage many cameras (Dahua cloud + RTSP/NVR)' },
+  { id: 'camera-cloud', label: 'Camera cloud', icon: Cloud, hint: 'Connect DH-H3A via Easy4IP and open live feed' },
   { id: 'integrations', label: 'AI & vision', icon: Radar, hint: 'ANPR, cameras, and automation defaults' },
   { id: 'privacy', label: 'Privacy & audit', icon: Eye, hint: 'Logging posture and diagnostics' },
   { id: 'errors', label: 'Error log', icon: Bug, hint: 'Plate monitoring and application diagnostics' },
@@ -103,6 +109,11 @@ export const Settings: React.FC = () => {
   useEffect(() => {
     if (settings) setForm(settings);
   }, [settings]);
+
+  useEffect(() => {
+    const sec = new URLSearchParams(window.location.search).get('section');
+    if (sec && SECTIONS.some(s => s.id === sec)) setActive(sec);
+  }, []);
 
   useEffect(() => {
     const tz = settings?.timezone;
@@ -698,6 +709,14 @@ export const Settings: React.FC = () => {
                   min={0}
                   placeholder="0"
                 />
+                <InputRow
+                  label="Vehicle re-entry waiting period (minutes)"
+                  k="plate_resume_wait_minutes"
+                  type="number"
+                  desc="When a tracked car leaves the camera (e.g. moves to another bay) its record is Paused for this long. If the same plate returns within the window its in-shop time resumes; otherwise the record becomes Done. 0 = finalize immediately on exit."
+                  min={0}
+                  placeholder="120"
+                />
               </div>
               <SelectRow
                 label="Week starts on"
@@ -759,6 +778,26 @@ export const Settings: React.FC = () => {
               <ToggleRow label="New entry alerts" k="new_entry_alerts" />
               <ToggleRow label="Daily digest email" k="daily_report" />
               <InputRow label="Primary notification email" k="notification_email" type="email" placeholder="ops@example.com" />
+            </>
+          )}
+
+          {active === 'cameras' && (
+            <>
+              <SectionHeader
+                title="Cameras"
+                subtitle="Add and manage many cameras — Dahua cloud (Easy4IP) and generic RTSP/NVR. Each one auto-joins the live ANPR camera wall."
+              />
+              <CamerasManager />
+            </>
+          )}
+
+          {active === 'camera-cloud' && (
+            <>
+              <SectionHeader
+                title="Camera cloud connect"
+                subtitle="Guided setup — connect your DH-H3A, verify video, then open the live ANPR feed automatically."
+              />
+              <DahuaCloudConnect />
             </>
           )}
 

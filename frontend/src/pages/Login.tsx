@@ -6,11 +6,6 @@ import { settingsApi } from '../services/api';
 import { syncClientTimeFromPublicSettings } from '../lib/qatarTime';
 import toast from 'react-hot-toast';
 
-// ── Animated particle orb ─────────────────────────────────────────────
-const Orb: React.FC<{ style: React.CSSProperties }> = ({ style }) => (
-  <div style={style} className="orb" />
-);
-
 // ── Animated counter ──────────────────────────────────────────────────
 const AnimatedCounter: React.FC<{ target: number; suffix?: string; duration?: number }> = ({
   target, suffix = '', duration = 2000,

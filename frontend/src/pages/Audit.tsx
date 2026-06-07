@@ -368,7 +368,7 @@ export const Audit: React.FC = () => {
       auditApi.list({ page, limit: LOG_LIMIT, action: action || undefined, entity_type: entity || undefined }).then(r => r.data),
   });
 
-  const logs: AuditLog[] = Array.isArray(logData) ? logData : [];
+  const logs: AuditLog[] = useMemo(() => (Array.isArray(logData) ? logData : []), [logData]);
 
   const {
     data: errorLogData,

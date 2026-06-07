@@ -60,6 +60,11 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "camera_poll_interval": 30,
     "visionflow_deep_analysis_default": False,
     "anpr_auto_suggest_visit": True,
+    # Re-entry / dwell continuity: when a tracked vehicle leaves the camera view
+    # (e.g. moves to another bay), its record is "Paused" and keeps waiting this
+    # long. If the SAME plate reappears within the window the in-shop duration
+    # resumes; if not, the record flips Paused → Done. 0 disables (always Done).
+    "plate_resume_wait_minutes": 120,
     # —— Privacy / audit ——
     "admin_2fa": False,
     "audit_all": True,
@@ -124,6 +129,9 @@ def _sanitize_patch(body: dict[str, Any]) -> dict[str, Any]:
             out[k] = max(0.05, min(0.99, float(coerced)))
         elif k in ("total_bays", "max_service_hours", "overstay_threshold_minutes", "grace_period_minutes"):
             out[k] = max(0, min(10_000, int(coerced)))
+        elif k == "plate_resume_wait_minutes":
+            # 0 = always finalize on exit; cap at 7 days so the timer can't run forever.
+            out[k] = max(0, min(60 * 24 * 7, int(coerced)))
         elif k == "idle_warning_minutes":
             out[k] = max(5, min(24 * 60, int(coerced)))
         elif k == "camera_poll_interval":
@@ -147,6 +155,44 @@ def _sanitize_patch(body: dict[str, Any]) -> dict[str, Any]:
         else:
             out[k] = coerced
     return out
+
+
+import threading
+import time as _time
+
+# Short-TTL cache so the high-frequency engine consolidation (called every couple
+# of frames per live camera) doesn't re-read settings.json from disk each time,
+# while still picking up UI changes within a few seconds.
+_resume_gap_cache: dict[str, float] = {"value": -1.0, "expires": 0.0}
+_resume_gap_lock = threading.Lock()
+_RESUME_GAP_TTL_SEC = 5.0
+
+
+def get_resume_gap_seconds() -> float:
+    """Operator-configured vehicle re-entry waiting period, in seconds.
+
+    Reads ``plate_resume_wait_minutes`` from settings.json (cached). Falls back to
+    ``settings.PLATE_RESUME_GAP_SEC`` when unset/invalid. ``0`` minutes means a
+    track is finalized (Done) as soon as it exits — no waiting/resume window.
+    """
+    now = _time.monotonic()
+    cached = _resume_gap_cache
+    if cached["value"] >= 0 and now < cached["expires"]:
+        return cached["value"]
+    with _resume_gap_lock:
+        if cached["value"] >= 0 and now < cached["expires"]:
+            return cached["value"]
+        from ..config import settings
+        value = float(settings.PLATE_RESUME_GAP_SEC)
+        try:
+            mins = _load().get("plate_resume_wait_minutes")
+            if mins is not None:
+                value = max(0.0, float(mins) * 60.0)
+        except Exception:
+            pass
+        cached["value"] = value
+        cached["expires"] = now + _RESUME_GAP_TTL_SEC
+        return value
 
 
 def _load() -> dict[str, Any]:

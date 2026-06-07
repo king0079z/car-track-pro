@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useLocation } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import {
   Webcam, Power, PowerOff, Loader2, Activity, Car,
@@ -20,7 +20,7 @@ import {
   type VisionFlowVehicleRow,
 } from './VisionFlowPlateQuality';
 
-interface VehicleRow extends VisionFlowVehicleRow {}
+type VehicleRow = VisionFlowVehicleRow;
 
 interface LiveHealth {
   stream_connected?: boolean;
@@ -417,6 +417,8 @@ const CameraTile: React.FC<{
 
 export const VisionFlowMultiCam: React.FC = () => {
   const qc = useQueryClient();
+  const location = useLocation();
+  const cloudWelcomeShown = useRef(false);
   const [grid, setGrid] = useState<GridResponse | null>(null);
   const [sources, setSources] = useState(['dahua-hero-a1', '1', '2', '3']);
   const [busySlots, setBusySlots] = useState<Record<number, boolean>>({});
@@ -461,6 +463,15 @@ export const VisionFlowMultiCam: React.FC = () => {
     const id = setInterval(refreshGrid, 1200);
     return () => clearInterval(id);
   }, [refreshGrid]);
+
+  useEffect(() => {
+    const st = location.state as { fromCloudConnect?: boolean; liveStarted?: boolean } | null;
+    if (!st?.fromCloudConnect || cloudWelcomeShown.current) return;
+    cloudWelcomeShown.current = true;
+    setToast(st.liveStarted ? 'Camera connected — live feed is starting (models may take 30–90s on first run)' : 'Camera connected');
+    setTimeout(() => setToast(null), 6000);
+    window.history.replaceState({}, document.title);
+  }, [location.state]);
 
   const handleToggle = async (slotIndex: number, enable: boolean) => {
     setBusySlots(b => ({ ...b, [slotIndex]: true }));
@@ -579,33 +590,7 @@ export const VisionFlowMultiCam: React.FC = () => {
     pollAnpr();
     const id = setInterval(pollAnpr, 10000);
     return () => { cancelled = true; clearInterval(id); };
-  }, [activeJobSlots, qc]);
-
-  const handleCreateVisit = useCallback(async (
-    pa: PlateAction,
-    extra: { owner_name?: string; owner_phone?: string; assigned_bay?: number },
-  ) => {
-    if (!pa.detectionId) return;
-    const key = plateActionKey(pa.jobId, pa.plate);
-    setPlateActions(prev => ({ ...prev, [key]: { ...prev[key], state: 'creating' } }));
-    try {
-      const res = await anprApi.createVisit(pa.detectionId, extra);
-      const visitId = res.data.visit_id as number;
-      setPlateActions(prev => ({
-        ...prev,
-        [key]: { ...prev[key], state: 'created', linkedVisitId: visitId },
-      }));
-      qc.invalidateQueries({ queryKey: ['anpr-stats'] });
-      qc.invalidateQueries({ queryKey: ['anpr-recent'] });
-      setToast(`Visit opened for ${pa.plate}`);
-      setTimeout(() => setToast(null), 3500);
-    } catch (e: unknown) {
-      const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? 'Failed to create visit';
-      setPlateActions(prev => ({ ...prev, [key]: { ...prev[key], state: 'error', error: detail } }));
-      setToast(detail);
-      setTimeout(() => setToast(null), 4500);
-    }
-  }, [qc]);
+  }, [activeJobSlots, qc, sources]);
 
   const pcCamDetected = grid?.probed_cameras?.some(c => c.index === 0);
 
@@ -710,7 +695,17 @@ export const VisionFlowMultiCam: React.FC = () => {
         )}
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 16, marginBottom: 24 }}>
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns:
+            slots.length <= 2
+              ? 'repeat(auto-fit, minmax(0, 1fr))'
+              : 'repeat(auto-fit, minmax(340px, 1fr))',
+          gap: 16,
+          marginBottom: 24,
+        }}
+      >
         {slots.map(slot => (
           <CameraTile
             key={slot.slot}

@@ -55,10 +55,23 @@ _PLATE_DEBUG = os.getenv("PLATE_DEBUG", "0").strip().lower() in ("1", "true", "y
 _PLATE_DEBUG_EVERY = max(1, int(os.getenv("PLATE_DEBUG_EVERY", "15") or "15"))
 
 
-def _consolidate_manifest_rows(rows: list[dict]) -> list[dict]:
+def _resume_gap_seconds() -> float:
+    """Operator-configured vehicle re-entry waiting period (settings.json), in sec.
+
+    Falls back to the static config default if the settings store is unavailable.
+    """
+    try:
+        from ..routers.settings import get_resume_gap_seconds
+        return get_resume_gap_seconds()
+    except Exception:
+        return float(settings.PLATE_RESUME_GAP_SEC)
+
+
+def _consolidate_manifest_rows(rows: list[dict], *, now_sec: float | None = None) -> list[dict]:
     return consolidate_vehicle_rows(
         rows,
-        resume_gap_sec=float(settings.PLATE_RESUME_GAP_SEC),
+        resume_gap_sec=_resume_gap_seconds(),
+        now_sec=now_sec,
     )
 
 
@@ -143,16 +156,22 @@ def _is_plate_shaped_box(box, *, min_aspect: float = 1.6, max_aspect: float = 9.
     return min_aspect <= asp <= max_aspect
 
 
+# Minimum plate-box size accepted from the detector. These floors must stay
+# small: on multi-lane / elevated footage a readable plate is only ~55-90 px
+# wide at the 1020 px working width, and the previous floors (0.07*W ≈ 71 px)
+# silently discarded ~50% of correctly detected plates (the farther cars),
+# which is why many visible vehicles never reached the registry. The
+# aspect-ratio gate (_is_plate_shaped_box) still rejects non-plate noise.
 def _min_plate_area_for_frame(frame_h: int, frame_w: int) -> float:
-    return max(1400.0, float(frame_h * frame_w) * 0.0025)
+    return max(450.0, float(frame_h * frame_w) * 0.0010)
 
 
 def _min_plate_width_for_frame(frame_w: int) -> float:
-    return max(56.0, float(frame_w) * 0.07)
+    return max(30.0, float(frame_w) * 0.030)
 
 
 def _min_plate_height_for_frame(frame_h: int) -> float:
-    return max(16.0, float(frame_h) * 0.035)
+    return max(10.0, float(frame_h) * 0.018)
 
 
 _MAX_PLATE_VOTES = 24
@@ -169,6 +188,68 @@ def _point_xy(pt) -> tuple[float, float]:
     fx = float(x.item()) if hasattr(x, "item") else float(x)
     fy = float(y.item()) if hasattr(y, "item") else float(y)
     return fx, fy
+
+
+# ── Shared OCR readers ───────────────────────────────────────────────────────
+# OCR models are stateless and are by far the largest standalone memory consumer.
+# With many concurrent live cameras we share ONE reader across all SpeedEstimator
+# instances instead of loading N copies. The underlying torch/onnx models are not
+# guaranteed thread-safe, so concurrent calls are serialized via a call lock.
+_shared_ocr_build_lock = threading.Lock()
+_shared_ocr_call_lock = threading.Lock()
+_shared_fast_reader: Any = None
+_shared_easy_reader: Any = None
+_shared_ocr_engine: str | None = None
+_shared_ocr_built = False
+
+
+_inference_sema: Any = None
+_inference_sema_lock = threading.Lock()
+
+
+def _get_inference_semaphore():
+    """Process-wide bounded semaphore limiting concurrent heavy inferences (or None).
+
+    Prevents N live-camera threads from thrashing a single GPU/CPU. Sized by
+    ``INFERENCE_MAX_CONCURRENCY`` (≈ GPU count); 0 disables (legacy unlimited).
+    """
+    global _inference_sema
+    n = int(getattr(settings, "INFERENCE_MAX_CONCURRENCY", 0) or 0)
+    if n <= 0:
+        return None
+    if _inference_sema is None:
+        with _inference_sema_lock:
+            if _inference_sema is None:
+                _inference_sema = threading.BoundedSemaphore(n)
+    return _inference_sema
+
+
+def _build_shared_ocr(gpu: bool) -> tuple[Any, Any, str]:
+    """Build (and cache) the process-wide OCR reader. Thread-safe; builds once."""
+    global _shared_fast_reader, _shared_easy_reader, _shared_ocr_engine, _shared_ocr_built
+    with _shared_ocr_build_lock:
+        if _shared_ocr_built:
+            return _shared_fast_reader, _shared_easy_reader, _shared_ocr_engine or "easyocr"
+        engine = (settings.PLATE_OCR_ENGINE or "fast_plate").strip().lower()
+        fast_reader: Any = None
+        easy_reader: Any = None
+        if engine == "fast_plate":
+            try:
+                from fast_plate_ocr import LicensePlateRecognizer
+                fast_reader = LicensePlateRecognizer(settings.FAST_PLATE_MODEL)
+            except Exception:
+                fast_reader = None
+                engine = "easyocr"
+        if fast_reader is None:
+            import easyocr
+            easy_reader = easyocr.Reader(["en"], gpu=gpu, verbose=False)
+            engine = "easyocr"
+        _shared_fast_reader = fast_reader
+        _shared_easy_reader = easy_reader
+        _shared_ocr_engine = engine
+        _shared_ocr_built = True
+        _log.info("Shared OCR reader initialized (engine=%s, gpu=%s)", engine, gpu)
+        return fast_reader, easy_reader, engine
 
 
 # ── SpeedEstimator ─────────────────────────────────────────────────────────────
@@ -208,6 +289,7 @@ class SpeedEstimator:
 
         self.spd: dict[int, int] = {}
         self._spd_ema: dict[int, float] = {}
+        self._spd_samples: dict[int, list[float]] = {}
         self._speed_sum: dict[int, float] = {}
         self._speed_count: dict[int, int] = {}
         self.logged_ids: set[int] = set()
@@ -230,17 +312,23 @@ class SpeedEstimator:
         self._fast_reader = None    # fast-plate-ocr recognizer
         self._ocr_engine = (settings.PLATE_OCR_ENGINE or "fast_plate").strip().lower()
         self._gpu = _gpu
-        if self._ocr_engine == "fast_plate":
-            try:
-                from fast_plate_ocr import LicensePlateRecognizer
-                self._fast_reader = LicensePlateRecognizer(settings.FAST_PLATE_MODEL)
-            except Exception:
-                self._fast_reader = None
+        if bool(getattr(settings, "LIVE_SHARED_OCR", True)):
+            # Reuse one process-wide reader across all cameras; serialize calls.
+            self._fast_reader, self.reader, self._ocr_engine = _build_shared_ocr(_gpu)
+            self._ocr_call_lock = _shared_ocr_call_lock
+        else:
+            self._ocr_call_lock = threading.Lock()
+            if self._ocr_engine == "fast_plate":
+                try:
+                    from fast_plate_ocr import LicensePlateRecognizer
+                    self._fast_reader = LicensePlateRecognizer(settings.FAST_PLATE_MODEL)
+                except Exception:
+                    self._fast_reader = None
+                    self._ocr_engine = "easyocr"
+            if self._fast_reader is None:
+                import easyocr
+                self.reader = easyocr.Reader(["en"], gpu=_gpu, verbose=False)
                 self._ocr_engine = "easyocr"
-        if self._fast_reader is None:
-            import easyocr
-            self.reader = easyocr.Reader(["en"], gpu=_gpu, verbose=False)
-            self._ocr_engine = "easyocr"
 
         self._db_backend: str | None = None
         self.db_connection = self._connect_to_db()
@@ -267,6 +355,11 @@ class SpeedEstimator:
         self._proc_frame_no = 0
         self._last_seen_frame: dict[int, int] = {}
         self._exit_grace_frames = 10
+        # True once the whole session is finalized (file analysis finished or live
+        # session stopped). While False the manifest knows "now" and can show
+        # recently-exited cars as Paused (waiting to resume); once finalized every
+        # exited track is reported as Done.
+        self._finalized = False
 
     def _record_speed_sample(self, track_id: int, kmh: float) -> None:
         if track_id < 0 or kmh <= 0:
@@ -551,7 +644,8 @@ class SpeedEstimator:
             lambda c: self.reader.readtext(c, allowlist=allowlist, paragraph=False),
         ]:
             try:
-                results = fn(crop)
+                with self._ocr_call_lock:
+                    results = fn(crop)
                 break
             except Exception:
                 results = []
@@ -670,10 +764,12 @@ class SpeedEstimator:
         elif img.ndim == 3 and img.shape[2] >= 3:
             img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         try:
-            res = self._fast_reader.run(img, return_confidence=True)
+            with self._ocr_call_lock:
+                res = self._fast_reader.run(img, return_confidence=True)
         except TypeError:
             try:
-                res = self._fast_reader.run(img)
+                with self._ocr_call_lock:
+                    res = self._fast_reader.run(img)
             except Exception:
                 return "", 0.0
         except Exception:
@@ -913,11 +1009,13 @@ class SpeedEstimator:
             self._finalize_track(tid)
         self._last_seen_frame.clear()
         self._prev_positive_ids.clear()
+        self._finalized = True
 
     def _drop_track_aux_state(self, track_id: int) -> None:
         for store in (
             self.spd,
             self._spd_ema,
+            self._spd_samples,
             self._speed_sum,
             self._speed_count,
             self._last_ocr_text,
@@ -994,6 +1092,10 @@ class SpeedEstimator:
     def get_vehicle_manifest(self) -> list[dict[str, Any]]:
         vfps = max(self._vid_fps_store, 1e-3)
         src_frame = int(getattr(self, "_source_frame_idx", 0) or 0)
+        # "now" in source-time seconds drives Paused-vs-Done while a session is
+        # still running. Once finalized (file done / live stopped) there is no
+        # "now" → every exited track is reported as Done.
+        now_sec = None if self._finalized else (src_frame / vfps)
 
         for tid, s in self._sessions.items():
             self._registry_touch(tid, int(s["last_src_frame"]), active=True, session=s)
@@ -1047,11 +1149,11 @@ class SpeedEstimator:
                 })
             done = sorted(self._completed_rows, key=lambda r: r["t_enter_sec"])
             pre_rows = done + active
-            rows = _consolidate_manifest_rows(pre_rows)
+            rows = _consolidate_manifest_rows(pre_rows, now_sec=now_sec)
         else:
             self._enrich_manifest_ocr(rows)
             pre_rows = [dict(r) for r in rows]
-            rows = _consolidate_manifest_rows(rows)
+            rows = _consolidate_manifest_rows(rows, now_sec=now_sec)
 
         rows.sort(key=lambda r: float(r.get("t_enter_sec") or 0))
         self._debug_log_manifest(pre_rows, rows)
@@ -1104,9 +1206,17 @@ class SpeedEstimator:
             dt = max(self._proc_stride / max(self._vid_fps, 1e-3), 1e-6)
             v_px_s = pix_dist / dt
             kmh_inst = min(v_px_s * self._meter_per_pixel * 3.6, self._max_speed_kmh)
+            # Median over a short window removes single-frame spikes from detection
+            # jitter; the EMA then smooths the trend → steadier, more accurate speed.
+            win = max(1, int(getattr(settings, "SPEED_WINDOW_SAMPLES", 5)))
+            samples = self._spd_samples.setdefault(tid, [])
+            samples.append(kmh_inst)
+            if len(samples) > win:
+                del samples[:-win]
+            kmh_med = float(np.median(samples)) if samples else kmh_inst
             prev = self._spd_ema.get(tid)
             alpha = self._speed_smooth
-            self._spd_ema[tid] = kmh_inst if prev is None else alpha * kmh_inst + (1.0 - alpha) * prev
+            self._spd_ema[tid] = kmh_med if prev is None else alpha * kmh_med + (1.0 - alpha) * prev
             self.spd[tid] = int(round(self._spd_ema[tid]))
             self._record_speed_sample(tid, self._spd_ema[tid])
 
@@ -1287,14 +1397,6 @@ def _notify_phase(cb: Callable[[str], Any] | None, msg: str) -> None:
             pass
 
 
-def _notify_phase(cb: Callable[[str], Any] | None, msg: str) -> None:
-    if cb:
-        try:
-            cb(msg)
-        except Exception:
-            pass
-
-
 def _run_live_tracking_loop(
     cap: cv2.VideoCapture,
     speed_obj: SpeedEstimator,
@@ -1355,7 +1457,12 @@ def _run_live_tracking_loop(
     def _reader() -> None:
         nonlocal consecutive_miss, reader_running
         while reader_running and (stop_event is None or not stop_event.is_set()):
-            ret, frame = cap.read()
+            try:
+                ret, frame = cap.read()
+            except Exception:
+                # A backend-level read error is treated like a failed read so the
+                # reconnect loop can re-open the capture instead of crashing the thread.
+                ret, frame = False, None
             if not ret:
                 consecutive_miss += 1
                 if consecutive_miss >= live_read_fail_max:
@@ -1372,15 +1479,45 @@ def _run_live_tracking_loop(
     reader = threading.Thread(target=_reader, name="visionflow-live-reader", daemon=True)
     reader.start()
 
+    # Stall watchdog: if the capture stays "open" but stops delivering NEW frames
+    # (frozen RTSP buffer or a blocked cap.read()), force a reconnect instead of
+    # replaying the last frame forever while health looks green.
+    last_seq = 0
+    last_seq_change = time.monotonic()
+    # Tolerate slow Wi-Fi sub-streams / CPU inference before declaring a stall.
+    # Configurable via LIVE_STALL_RECONNECT_SEC so a busy decode pipeline does
+    # not trigger constant reconnects (the "fluctuating feed" symptom).
+    try:
+        stall_timeout = max(8.0, float(settings.LIVE_STALL_RECONNECT_SEC))
+    except Exception:
+        stall_timeout = 25.0
+    speed_err_count = 0
+
     try:
         while True:
             if stop_event is not None and stop_event.is_set():
                 break
-            if not reader.is_alive() and consecutive_miss >= live_read_fail_max:
+            # Reader exits on repeated read failures, end-of-stream, or an error.
+            # Break so the outer reconnect loop re-opens the capture; never keep
+            # processing a stale frame behind a dead reader.
+            if not reader.is_alive():
                 break
 
             with slot_lock:
                 frame = frame_slot["frame"]
+                seq = frame_slot["seq"]
+
+            now_watch = time.monotonic()
+            if seq != last_seq:
+                last_seq = seq
+                last_seq_change = now_watch
+            elif frame is not None and (now_watch - last_seq_change) > stall_timeout:
+                _log.warning(
+                    "Live feed stalled (no new frame for %.0fs); forcing reconnect.",
+                    stall_timeout,
+                )
+                break
+
             if frame is None:
                 time.sleep(0.02)
                 continue
@@ -1397,10 +1534,24 @@ def _run_live_tracking_loop(
             ai_gate = now
             work = cv2.resize(frame.copy(), (target_w, new_h))
             speed_obj._source_frame_idx = count
+            _sema = _get_inference_semaphore()
+            if _sema is not None:
+                _sema.acquire()
             try:
                 result = speed_obj.estimate_speed(work)
             except Exception:
+                # Don't silently swallow: surface the failure (rate-limited) so a
+                # systematic problem is observable instead of producing an empty feed.
+                speed_err_count += 1
+                if speed_err_count <= 3 or speed_err_count % 200 == 0:
+                    _log.exception(
+                        "estimate_speed failed (occurrence #%d); skipping frame.",
+                        speed_err_count,
+                    )
                 continue
+            finally:
+                if _sema is not None:
+                    _sema.release()
             processed += 1
 
             if health_pulse is not None:
@@ -1560,7 +1711,14 @@ def _run_tracking_loop(
 
             frame = cv2.resize(frame, (target_w, new_h))
             speed_obj._source_frame_idx = count
-            result = speed_obj.estimate_speed(frame)
+            _sema = _get_inference_semaphore()
+            if _sema is not None:
+                _sema.acquire()
+            try:
+                result = speed_obj.estimate_speed(frame)
+            finally:
+                if _sema is not None:
+                    _sema.release()
             processed += 1
 
             if health_pulse is not None:
@@ -1784,11 +1942,20 @@ def analyze_live_stream(
     from .video_writer_util import even_size, open_video_writer
 
     source = normalize_live_source(source)
+    from .dahua_camera import is_dahua_alias
+
     model_path = _require_yolo_weights()
     stride = max(1, args.stride)
     total_inference_est = 1_000_000_000
     low_src = source.lower()
-    reconnect = bool(always_on) or source.isdigit() or low_src.startswith("rtsp")
+    # Auto-reconnect for continuous sources, honoring the global kill-switch so
+    # operators can disable it (e.g. for debugging) via LIVE_AUTO_RECONNECT=false.
+    reconnect = bool(getattr(settings, "LIVE_AUTO_RECONNECT", True)) and (
+        bool(always_on)
+        or source.isdigit()
+        or low_src.startswith("rtsp")
+        or is_dahua_alias(source)
+    )
     reconnect_delay = float(settings.LIVE_RECONNECT_BASE_SEC)
     reconnect_count = 0
     session_started = time.monotonic()

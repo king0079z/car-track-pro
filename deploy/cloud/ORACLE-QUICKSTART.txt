@@ -1,0 +1,102 @@
+CarTrack — ALL-IN-ONE on Oracle Cloud (Always Free)  ·  QUICKSTART
+==================================================================
+
+Whole app on ONE free VM. No Vercel, no on-site PC:
+
+  Camera --Easy4IP P2P--> Dahua cloud --P2P pull--> Oracle Ampere A1 VM
+                                                       (frontend + backend
+                                                        + YOLO/OCR ANPR)
+                                                          | HTTPS (Caddy)
+                                                          v
+                                                     Browser anywhere
+
+
+STEP 1 — Create an Oracle Cloud account (free, ~10 min)
+-------------------------------------------------------
+1. Go to https://www.oracle.com/cloud/free/  ->  "Start for free".
+2. Enter email, country (Qatar), verify email.
+3. Fill name/address. Add a payment card — for IDENTITY VERIFICATION ONLY.
+   Always Free resources are NOT charged; you are not upgraded unless you
+   explicitly choose "Upgrade to Paid".
+4. Verify phone via SMS. Choose a Home Region close to Qatar
+   (e.g. "Saudi Arabia Central (Riyadh)" or "UAE (Dubai)").  *** Pick carefully:
+   the Home Region cannot be changed later. ***
+5. Wait for "Your account is ready" email.
+
+
+STEP 2 — Create the Always Free Ampere A1 VM
+--------------------------------------------
+Console -> hamburger menu -> Compute -> Instances -> "Create instance".
+  Name        : cartrack
+  Image       : Canonical Ubuntu 24.04
+  Shape       : "Ampere" -> VM.Standard.A1.Flex
+                set 4 OCPUs / 24 GB RAM  (this whole size is Always Free)
+  Networking  : create a new VCN, "Assign a public IPv4 address" = YES
+  SSH keys    : "Save private key" -> download it (cartrack.key). KEEP IT.
+Click Create. When it shows RUNNING, copy the PUBLIC IP ADDRESS.
+
+(If you get "Out of host capacity", retry in a bit or try another
+Availability Domain / region — A1 free capacity comes and goes.)
+
+
+STEP 3 — Open the cloud firewall (Security List)
+------------------------------------------------
+Console -> Networking -> Virtual Cloud Networks -> your VCN ->
+  Security Lists -> Default Security List -> Add Ingress Rules:
+    Source 0.0.0.0/0 , TCP , Dest port 80
+    Source 0.0.0.0/0 , TCP , Dest port 443
+(22/SSH is already open.)
+
+
+STEP 4 — Free HTTPS domain
+--------------------------
+https://www.duckdns.org -> sign in -> create subdomain (e.g. "mycam")
+-> copy the TOKEN. Your domain: mycam.duckdns.org
+
+
+STEP 5 — Hand it to me (two options)
+------------------------------------
+OPTION A (I deploy from your PC — simplest):
+  Put the downloaded cartrack.key somewhere on this PC and tell me:
+    - the VM public IP
+    - the path to cartrack.key
+    - your DuckDNS domain + token
+  I will SSH in from here, clone the repo, copy the model weights, and run
+  setup-oracle.sh — end to end.
+
+OPTION B (fully automatic CI/CD — best long-term):
+  In GitHub -> repo -> Settings -> Secrets and variables -> Actions, add:
+    DEPLOY_HOST    = mycam.duckdns.org
+    DEPLOY_USER    = ubuntu
+    DEPLOY_SSH_KEY = (paste the full contents of cartrack.key)
+    DEPLOY_PATH    = /home/ubuntu/Car Tracking system
+    CADDY_DOMAIN   = mycam.duckdns.org
+  After the first manual deploy, every push auto-deploys the whole app.
+
+
+WHAT THE INSTALL ACTUALLY RUNS (Step 5 details)
+-----------------------------------------------
+  ssh -i cartrack.key ubuntu@<PUBLIC_IP>
+  sudo apt-get update && sudo apt-get install -y git
+  git clone <YOUR_REPO_URL> "Car Tracking system"
+  cd "Car Tracking system/deploy/cloud"
+  # copy YOLO weights (git-ignored) onto the VM, once:
+  #   from your PC:  scp -i cartrack.key backend/models/*.pt \
+  #                     ubuntu@<PUBLIC_IP>:"~/Car Tracking system/deploy/cloud/data/models/"
+  sudo bash setup-oracle.sh mycam.duckdns.org <DUCKDNS_TOKEN>
+
+
+STEP 6 — Verify
+---------------
+  https://mycam.duckdns.org            -> the dashboard
+  https://mycam.duckdns.org/api/health -> OK
+  docker compose -f docker-compose.oracle.yml logs -f backend   # P2P "Ready to connect"
+
+
+NOTES
+-----
+- The Ampere A1 free shape (4 cores/24 GB, ARM) is strong enough for live ANPR;
+  the Docker images are multi-arch and build natively on ARM.
+- Model weights (best.pt) are git-ignored, so they are copied to data/models/
+  once and bind-mounted (survive redeploys). Code updates flow via git/CI.
+- Keep .env.cloud and cartrack.key private.

@@ -1,0 +1,20 @@
+# Install via Hetzner web console (>_ button) — if SSH from PC fails
+# Paste each block in order. Replace YOUR_DUCKDNS_TOKEN and YOUR_CAMERA_PASSWORD.
+
+# ── Block 1: clone + bootstrap ───────────────────────────────────────────────
+apt-get update -y && apt-get install -y git curl
+git clone https://github.com/king0079z/car-track-pro.git /opt/cartrack
+cd /opt/cartrack/deploy/cloud
+chmod +x bootstrap-vps.sh setup-oracle.sh
+
+# ── Block 2: you MUST upload best.pt first ───────────────────────────────────
+# From your PC (separate PowerShell window):
+#   scp "C:\Users\Mohamed\Desktop\Car Tracking system1\backend\models\best.pt" root@46.225.26.2:/root/best.pt
+# Then continue Block 3 on the VPS.
+
+# ── Block 3: run install ─────────────────────────────────────────────────────
+sudo bash bootstrap-vps.sh cartrackpro.duckdns.org YOUR_DUCKDNS_TOKEN YOUR_CAMERA_PASSWORD
+
+# ── Block 4: verify ──────────────────────────────────────────────────────────
+curl -s https://cartrackpro.duckdns.org/api/health
+docker compose -f docker-compose.oracle.yml logs -f backend

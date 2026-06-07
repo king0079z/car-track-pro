@@ -1,0 +1,28 @@
+# All-in-one HTTPS for CarTrack on a single VM (Oracle Cloud / any host).
+# CADDY_DOMAIN is injected from the environment (e.g. mycam.duckdns.org).
+# Caddy obtains a free Let's Encrypt certificate automatically on first boot.
+#
+#   https://<domain>/api/*  +  /ws   -> FastAPI backend (REST + live WebSocket)
+#   https://<domain>/*               -> React single-page app (static)
+
+{$CADDY_DOMAIN} {
+	encode gzip
+
+	# Backend: REST API (/api/*), VisionFlow live ANPR (/vf/*), + WebSocket (/ws).
+	@backend path /api/* /vf/* /ws /ws/*
+	handle @backend {
+		reverse_proxy backend:8000 {
+			header_up Host {host}
+			header_up X-Real-IP {remote_host}
+			# Allow long-lived WebSocket / live-stream connections (no buffering).
+			flush_interval -1
+		}
+	}
+
+	# Everything else: the React SPA, with client-side routing fallback.
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		file_server
+	}
+}

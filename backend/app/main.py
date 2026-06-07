@@ -142,15 +142,29 @@ async def lifespan(app: FastAPI):
     )
     try:
         from .services.dahua_p2p_tunnel import check_p2p_dependencies, prewarm_cloud_tunnel_async
+        from .services.camera_config import dahua_env_active, dahua_prewarm_on_startup
 
         dep_err = check_p2p_dependencies()
         if dep_err:
             logger.warning("Dahua cloud P2P: %s", dep_err)
-        else:
+        elif dahua_env_active():
+            logger.info(
+                "Dahua cloud camera configured via DAHUA_* env (Easy4IP P2P, no on-site PC) ✓"
+            )
+        if not dep_err and (dahua_prewarm_on_startup() or not dahua_env_active()):
             prewarm_cloud_tunnel_async()
             logger.info("Dahua cloud P2P prewarm started (if camera enabled in cloud mode) ✓")
     except Exception:
         logger.exception("Dahua cloud P2P startup hook failed")
+
+    if settings.LIVE_24_7_ENABLED:
+        try:
+            from .services.camera_provisioner import provision_all_enabled_async
+
+            provision_all_enabled_async()
+            logger.info("Multi-camera provisioner scheduled (auto-connect enabled cameras) ✓")
+        except Exception:
+            logger.exception("Camera provisioner startup hook failed")
 
     logger.info("CarTrack Pro ready ✓")
 
@@ -383,3 +397,39 @@ app.state.ws_manager = manager
 
 async def broadcast_event(event_type: str, data: dict):
     await manager.broadcast({"type": event_type, **data})
+
+
+# ── Single-origin SPA hosting (Hugging Face Space / all-in-one VM) ─────────────
+# When a built React bundle is present (FRONTEND_DIST env, default
+# backend/frontend_dist), serve it from THIS app so the whole product runs on a
+# single port/origin: the SPA, REST (/api), VisionFlow (/vf) and the live
+# WebSocket (/ws) all share one host. This is what lets a Hugging Face Docker
+# Space (which exposes only one port, 7860) host the full UI + API together.
+# Absent the bundle (local dev, Vercel split-hosting) this block is a no-op, so
+# existing deployments are untouched. Registered LAST so the catch-all never
+# shadows the API/asset/WS routes declared above.
+_FRONTEND_DIST = Path(os.environ.get("FRONTEND_DIST") or (_BACKEND_DIR / "frontend_dist"))
+if _FRONTEND_DIST.is_dir():
+    _SPA_INDEX = _FRONTEND_DIST / "index.html"
+    _spa_assets = _FRONTEND_DIST / "assets"
+    if _spa_assets.is_dir():
+        app.mount("/assets", StaticFiles(directory=str(_spa_assets)), name="spa_assets")
+
+    # Prefixes owned by the API/WS/static layers — the SPA fallback must not eat them.
+    _SPA_RESERVED = ("api", "vf", "ws", "uploads", "static", "analyzer")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def spa_catch_all(full_path: str):
+        head = full_path.split("/", 1)[0]
+        if head in _SPA_RESERVED:
+            return JSONResponse({"error": "Not found"}, status_code=404)
+        # Real static file (favicon, manifest, icons…) → serve it; otherwise fall
+        # back to index.html so client-side routing (deep links) works.
+        candidate = _FRONTEND_DIST / full_path
+        if full_path and candidate.is_file():
+            return FileResponse(str(candidate))
+        if _SPA_INDEX.is_file():
+            return FileResponse(str(_SPA_INDEX), headers=NO_CACHE)
+        return JSONResponse({"error": "Frontend bundle missing"}, status_code=404)
+
+    logger.info("SPA hosting enabled — serving frontend bundle from %s ✓", _FRONTEND_DIST)

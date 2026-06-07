@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import {
   Upload, History, DownloadCloud, FileText, X,
   Webcam,
@@ -26,7 +26,7 @@ interface PipelineOpts {
   prefer_fast_encoder: boolean;
 }
 
-interface VehicleRow extends VisionFlowVehicleRow {}
+type VehicleRow = VisionFlowVehicleRow;
 
 interface LiveHealth {
   stream_connected?: boolean;
@@ -260,6 +260,8 @@ const PlateActionCard: React.FC<{
 /* ─────────────────────────── Main ──────────────────────────────────────────── */
 
 export const VisionFlowStudio: React.FC = () => {
+  const location = useLocation();
+  const cloudAutostartDone = useRef(false);
   const [preset, setPreset] = useState('balanced');
   const [opts, setOpts] = useState<PipelineOpts>(PRESETS.balanced);
   const [pipelineOpen, setPipelineOpen] = useState(false);
@@ -555,6 +557,19 @@ export const VisionFlowStudio: React.FC = () => {
     }
   }, [liveSource, liveRecord, liveAlwaysOn, opts, stopPoll, stopPreview, stopLivePoll, startPreview, pollJob, startLivePoll]);
 
+  useEffect(() => {
+    const st = location.state as { fromCloudConnect?: boolean; autostartLive?: boolean; liveSource?: string } | null;
+    if (!st?.autostartLive || cloudAutostartDone.current) return;
+    cloudAutostartDone.current = true;
+    if (st.liveSource) setLiveSource(st.liveSource);
+    toast$('Camera connected — starting live analysis…', 'info');
+    window.history.replaceState({}, document.title);
+    const t = window.setTimeout(() => {
+      void startLive();
+    }, 400);
+    return () => window.clearTimeout(t);
+  }, [location.state, startLive]);
+
   const stopLive = useCallback(async () => {
     if (!jobId) return;
     try {
@@ -575,21 +590,6 @@ export const VisionFlowStudio: React.FC = () => {
     setSynced([]); setSyncStatus('idle'); setPlateActions({}); hasSynced.current = false;
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
-
-  /* ── Create visit from plate action ── */
-  const handleCreateVisit = useCallback(async (pa: PlateAction, extra: { owner_name?: string; owner_phone?: string; assigned_bay?: number }) => {
-    if (!pa.detectionId) return;
-    setPlateActions(prev => ({ ...prev, [pa.plate]: { ...prev[pa.plate], state: 'creating' } }));
-    try {
-      const res = await anprApi.createVisit(pa.detectionId, { owner_name: extra.owner_name, owner_phone: extra.owner_phone, assigned_bay: extra.assigned_bay });
-      const { visit_id } = res.data;
-      setPlateActions(prev => ({ ...prev, [pa.plate]: { ...prev[pa.plate], state: 'created', linkedVisitId: visit_id } }));
-      toast$(`Visit opened for ${pa.plate}`, 'info');
-    } catch (e: unknown) {
-      const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ?? 'Failed to create visit';
-      setPlateActions(prev => ({ ...prev, [pa.plate]: { ...prev[pa.plate], state: 'error', error: detail } }));
-    }
-  }, []);
 
   useEffect(() => () => { stopPoll(); stopPreview(); stopLivePoll(); }, [stopPoll, stopPreview, stopLivePoll]);
 

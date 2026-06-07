@@ -9,7 +9,22 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from ..models.user import User
-from ..services.camera_config import load_camera_config, save_camera_config, sanitize_dahua_patch
+from ..services.camera_config import (
+    add_camera,
+    delete_camera,
+    get_camera,
+    list_cameras,
+    load_camera_config,
+    sanitize_camera_patch,
+    save_camera_config,
+    sanitize_dahua_patch,
+    update_camera,
+)
+from ..services.camera_provisioner import (
+    deprovision_camera,
+    provision_camera,
+    session_id_for,
+)
 from ..services.dahua_camera import (
     HERO_A1_PROFILE,
     _connection_mode,
@@ -18,13 +33,16 @@ from ..services.dahua_camera import (
     discover_hero_a1_candidates,
     hero_profile_for_config,
     parse_dahua_qr_payload,
+    diagnose_connectivity,
     probe_saved_hero_a1,
     probe_stream,
     public_dahua_config,
     ptz_move,
     resolve_dahua_source,
+    source_for_camera,
 )
 from ..services.dahua_p2p_tunnel import get_p2p_tunnel_manager
+from ..services.live_supervisor import get_live_supervisor
 from ..utils.auth import require_admin
 
 router = APIRouter(prefix="/api/cameras", tags=["Cameras"])
@@ -100,6 +118,13 @@ def parse_dahua_qr(
 def get_dahua_hero_a1() -> JSONResponse:
     """Public read — password is masked. Does not block on cloud network probes."""
     return JSONResponse(public_dahua_config())
+
+
+@router.get("/dahua/hero-a1/diagnose")
+def dahua_connect_diagnose(current_user: User = Depends(require_admin)) -> JSONResponse:
+    """Quick LAN/cloud connectivity hints for the Camera cloud settings tab."""
+    cfg = load_camera_config()["dahua_hero_a1"]
+    return JSONResponse(diagnose_connectivity(cfg))
 
 
 @router.get("/dahua/hero-a1/cloud-status")
@@ -189,9 +214,32 @@ def test_dahua_hero_a1(
 
     mode = _connection_mode(cfg)
     if mode in ("p2p", "auto"):
-        from ..services.dahua_camera import resolve_dahua_source
+        lan_host = str(cfg.get("host") or "").strip()
+        if mode == "auto" and lan_host:
+            try:
+                lan_url = build_rtsp_url(
+                    host=lan_host,
+                    username=username,
+                    password=str(password),
+                    rtsp_port=int(data.get("rtsp_port") or cfg.get("rtsp_port") or 554),
+                    stream=stream,
+                )
+                lan_first = probe_stream(
+                    lan_url,
+                    use_tcp=use_tcp,
+                    username=username,
+                    password=str(password),
+                    timeout_sec=18.0,
+                )
+                if lan_first.get("ok"):
+                    lan_first["connection_mode"] = "lan"
+                    lan_first["resolved_url"] = lan_url.split("@")[-1] if "@" in lan_url else lan_url[:80]
+                    return JSONResponse(lan_first)
+            except ValueError:
+                pass
 
         url = resolve_dahua_source("dahua-hero-a1")
+        result: dict[str, Any] = {}
         if url:
             result = probe_stream(
                 url,
@@ -207,11 +255,44 @@ def test_dahua_hero_a1(
             if result.get("ok"):
                 return JSONResponse(result)
         if mode == "auto":
+            if lan_host:
+                try:
+                    lan_url = build_rtsp_url(
+                        host=lan_host,
+                        username=username,
+                        password=str(password),
+                        rtsp_port=int(data.get("rtsp_port") or cfg.get("rtsp_port") or 554),
+                        stream=stream,
+                    )
+                    lan_result = probe_stream(
+                        lan_url,
+                        use_tcp=use_tcp,
+                        username=username,
+                        password=str(password),
+                        timeout_sec=18.0,
+                    )
+                    if lan_result.get("ok"):
+                        lan_result["connection_mode"] = "lan"
+                        lan_result["fallback"] = (
+                            "Cloud tunnel unavailable; connected via LAN IP instead."
+                        )
+                        return JSONResponse(lan_result)
+                    lan_err = lan_result.get("error")
+                except ValueError:
+                    lan_err = "Invalid LAN IP or RTSP URL."
+            else:
+                lan_err = "LAN IP not configured."
+            diag = diagnose_connectivity(cfg)
+            probe_err = (result or {}).get("error") if url else "Cloud tunnel not ready."
             raise HTTPException(
                 status_code=400,
                 detail={
                     "message": "Could not reach camera via cloud or LAN.",
                     "hint": "Confirm LAN IP from DMSS, same Wi-Fi, and device password.",
+                    "cloud_error": probe_err,
+                    "lan_error": lan_err,
+                    "diagnosis": diag,
+                    "fixes": diag.get("fixes") or [],
                 },
             )
 
@@ -471,3 +552,187 @@ def dahua_status(
 ) -> JSONResponse:
     """Quick health check using saved configuration."""
     return JSONResponse(probe_saved_hero_a1(timeout_sec=timeout_sec))
+
+
+# ── Multi-camera registry (Dahua cloud + generic RTSP/NVR) ───────────────────
+# NOTE: registered AFTER the static /profiles and /dahua/* routes so those win
+# path matching; the single-segment /{camera_id} routes never shadow them.
+
+class CameraBody(BaseModel):
+    name: str | None = None
+    type: str | None = None            # "rtsp" | "dahua_p2p"
+    enabled: bool | None = None
+    connection_mode: str | None = None  # dahua: lan | auto | p2p
+    device_serial: str | None = None
+    device_type: str | None = None
+    security_code: str | None = None
+    host: str | None = None
+    rtsp_port: int | None = Field(None, ge=1, le=65535)
+    http_port: int | None = Field(None, ge=1, le=65535)
+    username: str | None = None
+    password: str | None = None
+    stream: str | None = None
+    use_tcp_transport: bool | None = None
+    rtsp_url: str | None = None
+    slot_index: int | None = Field(None, ge=0, le=255)
+    meter_per_pixel: float | None = Field(None, ge=0.0, le=0.5)
+
+
+def _camera_public(cam: dict[str, Any], *, include_status: bool = True) -> dict[str, Any]:
+    out = dict(cam)
+    if out.get("password"):
+        out["password"] = "********"
+        out["has_password"] = True
+    else:
+        out["has_password"] = False
+    out["source"] = source_for_camera(cam)
+    out["session_id"] = session_id_for(cam["id"])
+    if include_status:
+        out["live"] = _camera_live_status(cam)
+        if cam.get("type") == "dahua_p2p" and str(cam.get("device_serial") or "").strip():
+            out["tunnel"] = get_p2p_tunnel_manager(
+                cam["device_serial"], local_port=int(cam.get("p2p_local_port") or 18554)
+            ).status()
+    return out
+
+
+def _camera_live_status(cam: dict[str, Any]) -> dict[str, Any]:
+    session_id = session_id_for(cam["id"])
+    try:
+        sessions = get_live_supervisor().list_sessions()
+    except Exception:
+        sessions = []
+    for sess in sessions:
+        if str(sess.get("session_id")) == session_id:
+            return {
+                "registered": True,
+                "enabled": bool(sess.get("enabled")),
+                "job_id": sess.get("job_id"),
+                "slot_index": sess.get("slot_index"),
+            }
+    return {"registered": False, "enabled": False, "job_id": None, "slot_index": cam.get("slot_index")}
+
+
+@router.get("")
+def list_cameras_endpoint(current_user: User = Depends(require_admin)) -> JSONResponse:
+    """All registered cameras (Dahua cloud + RTSP/NVR) with live + tunnel status."""
+    cams = [_camera_public(c) for c in list_cameras()]
+    return JSONResponse({"cameras": cams, "count": len(cams)})
+
+
+@router.post("")
+def create_camera_endpoint(
+    body: CameraBody,
+    connect: bool = Query(True, description="Auto-connect (provision) after creating"),
+    current_user: User = Depends(require_admin),
+) -> JSONResponse:
+    """Add a camera. Dahua needs device_serial (+password); RTSP needs rtsp_url or host."""
+    data = body.model_dump(exclude_none=True)
+    if not data.get("name"):
+        raise HTTPException(status_code=400, detail="Camera name is required.")
+    ctype = str(data.get("type") or "rtsp").lower()
+    if ctype in ("dahua", "dahua_p2p", "p2p"):
+        if not str(data.get("device_serial") or "").strip():
+            raise HTTPException(status_code=400, detail="Dahua cloud camera requires a device serial (SN from the QR).")
+    else:
+        if not (str(data.get("rtsp_url") or "").strip() or str(data.get("host") or "").strip()):
+            raise HTTPException(status_code=400, detail="RTSP camera requires an rtsp_url or a host/LAN IP.")
+    cam = add_camera(data)
+    result: dict[str, Any] = {"camera": _camera_public(cam)}
+    if connect and cam.get("enabled"):
+        result["provision"] = provision_camera(cam["id"])
+    return JSONResponse(result, status_code=201)
+
+
+@router.get("/{camera_id}")
+def get_camera_endpoint(camera_id: str, current_user: User = Depends(require_admin)) -> JSONResponse:
+    cam = get_camera(camera_id)
+    if not cam:
+        raise HTTPException(status_code=404, detail="Camera not found.")
+    return JSONResponse(_camera_public(cam))
+
+
+@router.patch("/{camera_id}")
+def update_camera_endpoint(
+    camera_id: str,
+    body: CameraBody,
+    reconnect: bool = Query(True, description="Re-provision after updating"),
+    current_user: User = Depends(require_admin),
+) -> JSONResponse:
+    if not get_camera(camera_id):
+        raise HTTPException(status_code=404, detail="Camera not found.")
+    patch = sanitize_camera_patch(body.model_dump(exclude_none=True))
+    cam = update_camera(camera_id, patch)
+    if not cam:
+        raise HTTPException(status_code=404, detail="Camera not found.")
+    result: dict[str, Any] = {"camera": _camera_public(cam)}
+    if reconnect:
+        if cam.get("enabled"):
+            result["provision"] = provision_camera(cam["id"])
+        else:
+            deprovision_camera(cam["id"])
+            result["provision"] = {"ok": True, "stopped": True}
+    return JSONResponse(result)
+
+
+@router.delete("/{camera_id}")
+def delete_camera_endpoint(camera_id: str, current_user: User = Depends(require_admin)) -> JSONResponse:
+    if not get_camera(camera_id):
+        raise HTTPException(status_code=404, detail="Camera not found.")
+    deprovision_camera(camera_id)
+    ok = delete_camera(camera_id)
+    return JSONResponse({"ok": ok, "deleted": camera_id})
+
+
+@router.post("/{camera_id}/connect")
+def connect_camera_endpoint(camera_id: str, current_user: User = Depends(require_admin)) -> JSONResponse:
+    """Start the tunnel (if cloud) and register the live ANPR feed for this camera."""
+    cam = get_camera(camera_id)
+    if not cam:
+        raise HTTPException(status_code=404, detail="Camera not found.")
+    res = provision_camera(camera_id)
+    if not res.get("ok"):
+        raise HTTPException(status_code=400, detail=res.get("error") or "Could not connect camera.")
+    return JSONResponse(res)
+
+
+@router.post("/{camera_id}/disconnect")
+def disconnect_camera_endpoint(camera_id: str, current_user: User = Depends(require_admin)) -> JSONResponse:
+    if not get_camera(camera_id):
+        raise HTTPException(status_code=404, detail="Camera not found.")
+    deprovision_camera(camera_id)
+    return JSONResponse({"ok": True, "stopped": camera_id})
+
+
+@router.get("/{camera_id}/status")
+def camera_status_endpoint(camera_id: str, current_user: User = Depends(require_admin)) -> JSONResponse:
+    cam = get_camera(camera_id)
+    if not cam:
+        raise HTTPException(status_code=404, detail="Camera not found.")
+    return JSONResponse({
+        "id": cam["id"],
+        "live": _camera_live_status(cam),
+        "tunnel": (
+            get_p2p_tunnel_manager(
+                cam["device_serial"], local_port=int(cam.get("p2p_local_port") or 18554)
+            ).status()
+            if cam.get("type") == "dahua_p2p" and str(cam.get("device_serial") or "").strip()
+            else None
+        ),
+    })
+
+
+@router.post("/{camera_id}/test")
+def test_camera_endpoint(camera_id: str, current_user: User = Depends(require_admin)) -> JSONResponse:
+    """Probe the camera's resolved RTSP (Dahua cloud/LAN or the RTSP URL)."""
+    cam = get_camera(camera_id)
+    if not cam:
+        raise HTTPException(status_code=404, detail="Camera not found.")
+    if cam.get("type") == "dahua_p2p":
+        url = resolve_dahua_source(f"dahua://{cam['id']}")
+    else:
+        url = source_for_camera(cam)
+    if not url:
+        raise HTTPException(status_code=400, detail="Camera is not reachable yet (no resolved RTSP source).")
+    result = probe_stream(url, timeout_sec=12.0, use_tcp=bool(cam.get("use_tcp_transport", True)))
+    return JSONResponse(result)

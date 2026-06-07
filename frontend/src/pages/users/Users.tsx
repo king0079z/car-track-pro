@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Plus, X, Edit, Trash2, Shield, User as UserIcon, Search } from 'lucide-react';
+import { Plus, X, Edit, Trash2, User as UserIcon, Search } from 'lucide-react';
 import { usersApi } from '../../services/api';
 import { fmtQatar } from '../../lib/qatarTime';
 import toast from 'react-hot-toast';

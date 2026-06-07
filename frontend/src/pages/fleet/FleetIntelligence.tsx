@@ -2,13 +2,13 @@ import React, { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import {
-  BarChart2, Car, Clock, Layers, Sparkles, TrendingUp,
-  ArrowRight, RefreshCw, Download, Gauge, Wrench, Target,
+  BarChart2, Car, Layers, Sparkles, TrendingUp,
+  ArrowRight, RefreshCw, Download, Gauge, Wrench,
   ChevronRight, ChevronDown, ExternalLink,
 } from 'lucide-react';
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell,
-  CartesianGrid, ComposedChart, Line,
+  CartesianGrid,
 } from 'recharts';
 import { analyticsApi } from '../../services/api';
 import { qatarYmd, fmtQatar } from '../../lib/qatarTime';
