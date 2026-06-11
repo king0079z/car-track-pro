@@ -87,6 +87,7 @@ class VisitOut(BaseModel):
     payment_method: Optional[str] = None
     notes: Optional[str] = None
     service_items: List[ServiceItemOut] = []
+    whatsapp_notified_at: Optional[datetime] = None
     created_at: datetime
     class Config:
         from_attributes = True

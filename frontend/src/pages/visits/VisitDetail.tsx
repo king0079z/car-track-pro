@@ -5,9 +5,9 @@ import {
   ArrowLeft, Car, Clock, DollarSign, User, CheckCircle, Edit,
   LogOut, Play, Square, Plus, X, Wrench, Camera, Calendar, Printer,
   FileText, Phone, Mail, PenLine, TrendingUp, BarChart3, Wallet,
-  ChevronRight, ScanLine,
+  ChevronRight, ScanLine, MessageCircle,
 } from 'lucide-react';
-import { visitsApi, usersApi, servicesApi, API_BASE_URL } from '../../services/api';
+import { visitsApi, usersApi, servicesApi, vehiclesApi, API_BASE_URL } from '../../services/api';
 import {
   fmtQatar,
   fmtQatarDateLong,
@@ -121,6 +121,8 @@ export const VisitDetail: React.FC = () => {
   const [showStatusModal, setShowStatusModal] = useState(false);
   const [showAddService, setShowAddService] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
+  const [fixPlateOpen, setFixPlateOpen] = useState(false);
+  const [fixPlateValue, setFixPlateValue] = useState('');
   const [addServiceId, setAddServiceId] = useState<number | ''>('');
   const [analyticsRange, setAnalyticsRange] = useState<AnalyticsRange>('month');
 
@@ -241,6 +243,31 @@ export const VisitDetail: React.FC = () => {
       qc.invalidateQueries({ queryKey: ['services'] });
     },
     onError: () => toast.error('Checkout failed'),
+  });
+
+  const fixPlateMutation = useMutation({
+    mutationFn: ({ vehicleId, plate, merge }: { vehicleId: number; plate: string; merge: boolean }) =>
+      vehiclesApi.correctPlate(vehicleId, plate, merge),
+    onSuccess: (res, vars) => {
+      qc.invalidateQueries({ queryKey: ['visit', id] });
+      qc.invalidateQueries({ queryKey: ['vehicles'] });
+      setFixPlateOpen(false);
+      if (res.data?.merged_into) {
+        toast.success(`Plate corrected — merged (${res.data.visits_moved ?? 0} visits moved)`);
+      } else {
+        toast.success('Plate corrected');
+      }
+    },
+    onError: (e: unknown, vars) => {
+      const err = e as { response?: { status?: number; data?: { detail?: { hint?: string } | string } } };
+      if (err?.response?.status === 409 && !vars.merge) {
+        if (window.confirm('That plate already exists on another vehicle. Merge the duplicate records?')) {
+          fixPlateMutation.mutate({ ...vars, merge: true });
+        }
+        return;
+      }
+      toast.error(typeof err?.response?.data?.detail === 'string' ? err.response.data.detail : 'Could not correct plate');
+    },
   });
 
   const updateStatusMutation = useMutation({
@@ -374,6 +401,19 @@ export const VisitDetail: React.FC = () => {
           <div className="vd-hero-main">
             <div className="vd-plate-row">
               <span className="vd-plate">{visit.vehicle?.plate_number}</span>
+              {visit.vehicle_id && (
+                <button
+                  type="button"
+                  className="btn btn-secondary btn-sm"
+                  title="Fix OCR misread"
+                  onClick={() => {
+                    setFixPlateValue(visit.vehicle?.plate_number || '');
+                    setFixPlateOpen(true);
+                  }}
+                >
+                  <PenLine size={12} /> Fix plate
+                </button>
+              )}
               <span className={`status-pill status-${visit.status}`}>{cfg.label}</span>
               {visit.assigned_bay != null && (
                 <span className="vd-bay-pill">Bay {visit.assigned_bay}</span>
@@ -387,6 +427,14 @@ export const VisitDetail: React.FC = () => {
               <span><Calendar size={12} /> {fmtQatar(visit.entry_time, 'full')}</span>
               {visit.customer_name && <span><User size={12} /> {visit.customer_name}</span>}
               {visit.customer_phone && <span><Phone size={12} /> {visit.customer_phone}</span>}
+              {visit.status === 'completed' && visit.whatsapp_notified_at && (
+                <span title={`WhatsApp sent ${fmtQatar(visit.whatsapp_notified_at, 'full')}`}>
+                  <MessageCircle size={12} color="#25D366" /> WhatsApp sent
+                </span>
+              )}
+              {visit.status === 'completed' && !visit.whatsapp_notified_at && (visit.customer_phone || visit.vehicle?.owner_phone) && (
+                <span style={{ opacity: 0.75 }}><MessageCircle size={12} /> WhatsApp pending / not configured</span>
+              )}
               {visit.created_by_user && <span><Camera size={12} /> Opened by {visit.created_by_user.full_name}</span>}
               {visit.anpr_camera_name && <span><ScanLine size={12} /> {visit.anpr_camera_name}</span>}
             </div>
@@ -839,6 +887,42 @@ export const VisitDetail: React.FC = () => {
                   </button>
                 );
               })}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {fixPlateOpen && visit.vehicle_id && (
+        <div className="modal-backdrop" onClick={() => setFixPlateOpen(false)}>
+          <div className="modal-box" style={{ maxWidth: 400 }} onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2 style={{ fontSize: 16, fontWeight: 700 }}>Fix plate (OCR correction)</h2>
+              <button className="btn btn-ghost btn-icon" onClick={() => setFixPlateOpen(false)}><X size={16} /></button>
+            </div>
+            <div className="modal-body">
+              <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 12 }}>
+                Correct a misread plate. If the correct plate already exists, you can merge duplicate vehicle records.
+              </p>
+              <input
+                type="text"
+                value={fixPlateValue}
+                onChange={e => setFixPlateValue(e.target.value.toUpperCase())}
+                style={{ width: '100%', padding: '10px 12px', borderRadius: 8, border: '1px solid var(--border)', fontFamily: 'monospace', fontWeight: 700 }}
+                autoFocus
+              />
+              <button
+                type="button"
+                className="btn btn-primary"
+                style={{ marginTop: 14, width: '100%' }}
+                disabled={fixPlateMutation.isPending || fixPlateValue.trim().length < 2}
+                onClick={() => fixPlateMutation.mutate({
+                  vehicleId: visit.vehicle_id,
+                  plate: fixPlateValue.trim(),
+                  merge: false,
+                })}
+              >
+                {fixPlateMutation.isPending ? 'Saving…' : 'Save corrected plate'}
+              </button>
             </div>
           </div>
         </div>

@@ -6,7 +6,7 @@ import {
   Edit, Plus, BarChart2, TrendingUp,
   Camera, Save, X,
   ClipboardCopy, Sparkles, Gauge, ArrowRight, LayoutDashboard, FileText,
-  ChevronDown, ArrowUpDown, ArrowUp, ArrowDown, ExternalLink, Layers, Filter,
+  ChevronDown, ArrowUpDown, ArrowUp, ArrowDown, ExternalLink, Layers, Filter, PenLine,
 } from 'lucide-react';
 import { vehiclesApi } from '../../services/api';
 import { formatDistanceToNow } from 'date-fns';
@@ -333,6 +333,8 @@ export const VehicleProfile: React.FC = () => {
   const qc = useQueryClient();
   const [editMode, setEditMode] = useState(false);
   const [editForm, setEditForm] = useState<any>({});
+  const [fixPlateOpen, setFixPlateOpen] = useState(false);
+  const [fixPlateValue, setFixPlateValue] = useState('');
 
   const { data, isLoading } = useQuery({
     queryKey: ['vehicle-history', id],
@@ -348,6 +350,32 @@ export const VehicleProfile: React.FC = () => {
       qc.invalidateQueries({ queryKey: ['vehicle-history', id] });
     },
     onError: (e: any) => toast.error(e?.response?.data?.detail || 'Update failed'),
+  });
+
+  const fixPlateMutation = useMutation({
+    mutationFn: ({ plate, merge }: { plate: string; merge: boolean }) =>
+      vehiclesApi.correctPlate(Number(id), plate, merge),
+    onSuccess: (res) => {
+      qc.invalidateQueries({ queryKey: ['vehicle-history', id] });
+      qc.invalidateQueries({ queryKey: ['vehicles'] });
+      setFixPlateOpen(false);
+      if (res.data?.merged_into) {
+        toast.success('Merged into existing vehicle');
+        navigate(`/vehicles/${res.data.merged_into}`);
+      } else {
+        toast.success('Plate corrected');
+      }
+    },
+    onError: (e: unknown, vars) => {
+      const err = e as { response?: { status?: number } };
+      if (err?.response?.status === 409 && !vars.merge) {
+        if (window.confirm('That plate already exists. Merge duplicate records?')) {
+          fixPlateMutation.mutate({ ...vars, merge: true });
+        }
+        return;
+      }
+      toast.error('Could not correct plate');
+    },
   });
 
   const chartSeries = useMemo(() => {
@@ -510,6 +538,17 @@ export const VehicleProfile: React.FC = () => {
             </div>
             <button type="button" className="btn btn-secondary btn-sm" onClick={copyPlate} style={{ width: '100%', justifyContent: 'center', gap: 6 }}>
               <ClipboardCopy size={13} /> Copy plate
+            </button>
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              style={{ width: '100%', justifyContent: 'center', gap: 6, marginTop: 8 }}
+              onClick={() => {
+                setFixPlateValue(vehicle.plate_number || '');
+                setFixPlateOpen(true);
+              }}
+            >
+              <PenLine size={13} /> Fix plate
             </button>
             {isActive && (
               <div style={{
@@ -781,6 +820,35 @@ export const VehicleProfile: React.FC = () => {
           )}
         </div>
       </div>
+
+      {fixPlateOpen && (
+        <div className="modal-backdrop" onClick={() => setFixPlateOpen(false)}>
+          <div className="modal-box" style={{ maxWidth: 400 }} onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2 style={{ fontSize: 16, fontWeight: 700 }}>Fix plate</h2>
+              <button className="btn btn-ghost btn-icon" onClick={() => setFixPlateOpen(false)}><X size={16} /></button>
+            </div>
+            <div className="modal-body">
+              <input
+                type="text"
+                value={fixPlateValue}
+                onChange={e => setFixPlateValue(e.target.value.toUpperCase())}
+                style={{ width: '100%', padding: '10px 12px', borderRadius: 8, border: '1px solid var(--border)', fontFamily: 'monospace', fontWeight: 700 }}
+                autoFocus
+              />
+              <button
+                type="button"
+                className="btn btn-primary"
+                style={{ marginTop: 14, width: '100%' }}
+                disabled={fixPlateMutation.isPending || fixPlateValue.trim().length < 2}
+                onClick={() => fixPlateMutation.mutate({ plate: fixPlateValue.trim(), merge: false })}
+              >
+                {fixPlateMutation.isPending ? 'Saving…' : 'Save corrected plate'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <style>{`
         @keyframes ping { 75%,100%{transform:scale(2.5);opacity:0} }

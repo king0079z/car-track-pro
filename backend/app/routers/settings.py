@@ -48,6 +48,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # —— Notifications ——
     "email_notifications": False,
     "sms_notifications": False,
+    "whatsapp_notifications": True,
     "overstay_alerts": True,
     "new_entry_alerts": False,
     "daily_report": False,
@@ -249,3 +250,71 @@ def reset_settings(current_user: User = Depends(require_admin)):
     _save(data)
     invalidate_business_timezone_cache()
     return data
+
+
+# ── Backups (admin) ───────────────────────────────────────────────────────────
+
+@router.post("/backup-now")
+def backup_now(current_user: User = Depends(require_admin)):
+    """Trigger an immediate backup set and return its summary."""
+    from ..services.backup_service import run_backup
+
+    return run_backup()
+
+
+@router.get("/backups")
+def get_backups(current_user: User = Depends(require_admin)):
+    from ..config import settings as cfg
+    from ..services.backup_service import backup_root, last_backup_status, list_backups
+
+    return {
+        "enabled": bool(getattr(cfg, "BACKUP_ENABLED", True)),
+        "interval_hours": float(getattr(cfg, "BACKUP_INTERVAL_HOURS", 6.0)),
+        "retention_days": int(getattr(cfg, "BACKUP_RETENTION_DAYS", 14)),
+        "backup_dir": backup_root(),
+        "last_run": last_backup_status(),
+        "backups": list_backups(),
+    }
+
+
+@router.get("/whatsapp-status")
+def whatsapp_status(current_user: User = Depends(require_admin)):
+    """Whether WhatsApp completion notifications are wired up."""
+    from ..services.whatsapp_notify import status_summary
+
+    return status_summary()
+
+
+@router.get("/ocr-training")
+def ocr_training_status(current_user: User = Depends(require_admin)):
+    """Qatar OCR fine-tuning harness — dataset stats and next steps."""
+    from pathlib import Path
+
+    import csv
+
+    backend = Path(__file__).resolve().parents[2]
+    dataset = backend / "training" / "ocr_dataset"
+    labels = dataset / "labels.csv"
+    crops_dir = dataset / "crops"
+    out: dict[str, Any] = {
+        "dataset_dir": str(dataset),
+        "labels_csv": labels.is_file(),
+        "doc_path": str(backend / "training" / "OCR_FINETUNING.md"),
+        "harvest_script": "python backend/training/harvest_plate_dataset.py",
+        "evaluate_script": "python backend/training/evaluate_ocr.py",
+    }
+    if labels.is_file():
+        try:
+            with labels.open(newline="", encoding="utf-8") as f:
+                rows = list(csv.DictReader(f))
+            labeled = sum(1 for r in rows if (r.get("ground_truth") or "").strip())
+            out.update({
+                "total_crops": len(rows),
+                "labeled_crops": labeled,
+                "unlabeled_crops": len(rows) - labeled,
+            })
+        except Exception as exc:
+            out["labels_error"] = str(exc)
+    if crops_dir.is_dir():
+        out["crop_files"] = sum(1 for p in crops_dir.glob("*") if p.is_file())
+    return out

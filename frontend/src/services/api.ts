@@ -47,6 +47,11 @@ export const vehiclesApi = {
   create: (data: any) => api.post('/api/vehicles', data),
   update: (id: number, data: any) => api.patch(`/api/vehicles/${id}`, data),
   delete: (id: number) => api.delete(`/api/vehicles/${id}`),
+  duplicates: () => api.get('/api/vehicles/duplicates'),
+  merge: (targetId: number, sourceId: number) =>
+    api.post(`/api/vehicles/${targetId}/merge`, { source_vehicle_id: sourceId }),
+  correctPlate: (id: number, plate: string, mergeIfExists = false) =>
+    api.patch(`/api/vehicles/${id}/plate`, { plate_number: plate, merge_if_exists: mergeIfExists }),
 };
 
 // ── Visits ────────────────────────────────────────────────────────────
@@ -242,6 +247,36 @@ export const settingsApi = {
       client_error_auto_capture: boolean;
       timezone: string;
     }>('/api/settings/public'),
+  backupNow: () => api.post<{ ok: boolean; path?: string; files?: number; bytes?: number }>('/api/settings/backup-now'),
+  backups: () =>
+    api.get<{
+      enabled: boolean;
+      interval_hours: number;
+      retention_days: number;
+      backup_dir: string;
+      last_run: Record<string, unknown>;
+      backups: Array<{ name: string; created_at?: string; bytes?: number; files?: number }>;
+    }>('/api/settings/backups'),
+  whatsappStatus: () =>
+    api.get<{
+      configured: boolean;
+      enabled_env: boolean;
+      runtime_toggle: boolean;
+      uses_template: boolean;
+      default_country_code: string;
+    }>('/api/settings/whatsapp-status'),
+  ocrTraining: () =>
+    api.get<{
+      dataset_dir: string;
+      labels_csv: boolean;
+      total_crops?: number;
+      labeled_crops?: number;
+      unlabeled_crops?: number;
+      crop_files?: number;
+      harvest_script: string;
+      evaluate_script: string;
+      doc_path: string;
+    }>('/api/settings/ocr-training'),
 };
 
 // ── Application errors (Settings › Error log) ─────────────────────────

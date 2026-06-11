@@ -52,6 +52,7 @@ const SECTIONS: SettingsSection[] = [
   { id: 'privacy', label: 'Privacy & audit', icon: Eye, hint: 'Logging posture and diagnostics' },
   { id: 'errors', label: 'Error log', icon: Bug, hint: 'Plate monitoring and application diagnostics' },
   { id: 'security', label: 'Security', icon: Lock, hint: 'Sessions, lockout, network posture' },
+  { id: 'system', label: 'System', icon: Server, hint: 'Backups, WhatsApp wiring, OCR training' },
   { id: 'advanced', label: 'Advanced', icon: Sparkles, hint: 'Density, import/export, reset' },
 ];
 
@@ -160,6 +161,33 @@ export const Settings: React.FC = () => {
         .catch(() => {});
     },
     onError: () => toast.error('Could not reset settings'),
+  });
+
+  const { data: backupInfo, refetch: refetchBackups, isFetching: backupsLoading } = useQuery({
+    queryKey: ['settings-backups'],
+    queryFn: () => settingsApi.backups().then(r => r.data),
+    enabled: active === 'system',
+  });
+
+  const { data: waStatus } = useQuery({
+    queryKey: ['settings-whatsapp'],
+    queryFn: () => settingsApi.whatsappStatus().then(r => r.data),
+    enabled: active === 'notifications' || active === 'system',
+  });
+
+  const { data: ocrInfo } = useQuery({
+    queryKey: ['settings-ocr-training'],
+    queryFn: () => settingsApi.ocrTraining().then(r => r.data),
+    enabled: active === 'system',
+  });
+
+  const backupNowMutation = useMutation({
+    mutationFn: () => settingsApi.backupNow().then(r => r.data),
+    onSuccess: () => {
+      toast.success('Backup completed');
+      refetchBackups();
+    },
+    onError: () => toast.error('Backup failed'),
   });
 
   const setField = useCallback((key: string, val: unknown) => {
@@ -606,7 +634,7 @@ export const Settings: React.FC = () => {
                 </div>
               </div>
               <ToggleRow label="Require customer signature" k="require_signature" desc="Encourage capture during checkout flows" />
-              <ToggleRow label="Auto-checkout at closing time" k="auto_checkout" desc="Policy hint — enforce operationally if required" />
+              <ToggleRow label="ANPR auto-checkout" k="auto_checkout" desc="Automatically close camera-verified work orders once the vehicle has left the cameras for the re-entry waiting period (min 30 min)" />
             </>
           )}
 
@@ -632,6 +660,27 @@ export const Settings: React.FC = () => {
             <>
               <SectionHeader title="Notifications" subtitle="Routing signals for operational awareness." />
               <ToggleRow label="Email notifications" k="email_notifications" />
+              <ToggleRow label="WhatsApp completion messages" k="whatsapp_notifications" desc="Send the customer a WhatsApp message when their work order is completed (requires WHATSAPP_* credentials on the server)" />
+              {waStatus && (
+                <div style={{
+                  marginTop: 8, marginBottom: 16, padding: '12px 14px', borderRadius: 12,
+                  border: `1px solid ${waStatus.configured ? 'rgba(16,185,129,0.35)' : 'rgba(245,158,11,0.35)'}`,
+                  background: waStatus.configured ? 'rgba(16,185,129,0.08)' : 'rgba(245,158,11,0.08)',
+                  fontSize: 12, lineHeight: 1.5,
+                }}>
+                  <strong style={{ display: 'block', marginBottom: 4 }}>
+                    {waStatus.configured ? 'WhatsApp API connected' : 'WhatsApp not configured on server'}
+                  </strong>
+                  {waStatus.configured ? (
+                    <span>
+                      Sends on checkout when the work order has a customer phone.
+                      {waStatus.uses_template ? ' Using approved template.' : ' Using free-form text (24h window / sandbox).'}
+                    </span>
+                  ) : (
+                    <span>Set <code>WHATSAPP_ENABLED=true</code>, <code>WHATSAPP_ACCESS_TOKEN</code>, and <code>WHATSAPP_PHONE_NUMBER_ID</code> in the server <code>.env.cloud</code>, then restart the backend.</span>
+                  )}
+                </div>
+              )}
               <ToggleRow label="SMS notifications (planned)" k="sms_notifications" desc="Stored preference — wire to your SMS gateway when ready" />
               <ToggleRow label="Overstay alerts" k="overstay_alerts" desc="When dwell crosses the configured threshold" />
               <ToggleRow label="New entry alerts" k="new_entry_alerts" />
@@ -710,7 +759,7 @@ export const Settings: React.FC = () => {
             <>
               <SectionHeader title="Security posture" subtitle="Session hygiene and optional network clamp." />
               <InputRow label="Session timeout (minutes)" k="session_timeout_minutes" type="number" min={15} placeholder="480" desc="Policy reference — JWT expiry still governed server-side" />
-              <InputRow label="Max login attempts (policy)" k="max_login_attempts" type="number" min={3} max={50} placeholder="5" />
+              <InputRow label="Max login attempts (policy)" k="max_login_attempts" type="number" min={3} max={50} placeholder="5" desc="Enforced on login — account locked for 15 min after this many failures (per username + IP)" />
               <div style={{ marginTop: 8 }}>
                 <label className="label" style={{ fontWeight: 700, fontSize: 12 }}>
                   Allowed IP ranges / CIDR
@@ -725,6 +774,69 @@ export const Settings: React.FC = () => {
                   onChange={e => setField('allowed_ips', e.target.value)}
                 />
               </div>
+            </>
+          )}
+
+          {active === 'system' && (
+            <>
+              <SectionHeader title="Database backups" subtitle="Automatic SQLite snapshots every 6 hours (configurable via BACKUP_* env on the server). Includes cartrack.db, cameras, settings, and live session state." />
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginBottom: 16 }}>
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  disabled={backupNowMutation.isPending}
+                  onClick={() => backupNowMutation.mutate()}
+                  style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}
+                >
+                  <Download size={15} />
+                  {backupNowMutation.isPending ? 'Backing up…' : 'Backup now'}
+                </button>
+                <button type="button" className="btn btn-secondary" onClick={() => refetchBackups()} disabled={backupsLoading}>
+                  Refresh list
+                </button>
+              </div>
+              {backupInfo && (
+                <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 18, lineHeight: 1.55 }}>
+                  <div><strong>Auto backup:</strong> {backupInfo.enabled ? `every ${backupInfo.interval_hours}h, keep ${backupInfo.retention_days} days` : 'disabled'}</div>
+                  <div><strong>Directory:</strong> <code>{backupInfo.backup_dir}</code></div>
+                  {(backupInfo.backups?.length ?? 0) === 0 ? (
+                    <div style={{ marginTop: 8, color: 'var(--text-muted)' }}>No backups yet — click Backup now.</div>
+                  ) : (
+                    <ul style={{ margin: '8px 0 0', paddingLeft: 18 }}>
+                      {backupInfo.backups.slice(0, 8).map(b => (
+                        <li key={b.name}>{b.name}{b.bytes != null ? ` (${(b.bytes / 1024 / 1024).toFixed(1)} MB)` : ''}</li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
+
+              <SectionHeader title="Qatar OCR fine-tuning" subtitle="Harvest plate crops from live footage, label ground truth, evaluate accuracy, then train a Qatar-specific model (see backend/training/OCR_FINETUNING.md)." />
+              {ocrInfo && (
+                <div style={{ fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.55, marginBottom: 20 }}>
+                  <div><strong>Dataset:</strong> <code>{ocrInfo.dataset_dir}</code></div>
+                  {ocrInfo.total_crops != null ? (
+                    <div style={{ marginTop: 6 }}>
+                      {ocrInfo.labeled_crops} / {ocrInfo.total_crops} crops labeled
+                      {ocrInfo.unlabeled_crops ? ` (${ocrInfo.unlabeled_crops} need ground truth in labels.csv)` : ''}
+                    </div>
+                  ) : (
+                    <div style={{ marginTop: 6 }}>No dataset yet — run harvest on the server after collecting live ANPR footage.</div>
+                  )}
+                  <div style={{ marginTop: 10, fontFamily: 'monospace', fontSize: 11, opacity: 0.9 }}>
+                    {ocrInfo.harvest_script}<br />{ocrInfo.evaluate_script}
+                  </div>
+                </div>
+              )}
+
+              <SectionHeader title="WhatsApp delivery" subtitle="Server-side Meta Cloud API wiring (independent of the toggle above)." />
+              {waStatus && (
+                <div style={{ fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.55 }}>
+                  API configured: <strong>{waStatus.configured ? 'Yes' : 'No'}</strong>
+                  {' · '}Runtime toggle: <strong>{waStatus.runtime_toggle ? 'On' : 'Off'}</strong>
+                  {' · '}Default country: +{waStatus.default_country_code}
+                </div>
+              )}
             </>
           )}
 

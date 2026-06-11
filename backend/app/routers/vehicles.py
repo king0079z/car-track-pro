@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from sqlalchemy.orm import Session, joinedload
 from typing import List, Optional
 from ..database import get_db
@@ -7,9 +7,11 @@ from ..models.visit import Visit
 from ..models.service import ServiceItem
 from ..schemas.vehicle import VehicleCreate, VehicleUpdate, VehicleOut
 from ..schemas.visit import VisitOut
-from ..utils.auth import get_current_user, require_page, require_any_page
+from ..utils.auth import get_current_user, require_manager, require_page, require_any_page
 from ..models.user import User
+from ..services.audit_service import create_audit_log
 from ..services.permissions import apply_visit_scope
+from ..services.vehicle_identity import find_duplicate_groups, find_vehicle_for_plate, merge_vehicles
 
 router = APIRouter(prefix="/api/vehicles", tags=["Vehicles"])
 
@@ -35,11 +37,13 @@ def list_vehicles(
 
 @router.post("",  response_model=VehicleOut, status_code=201)
 def create_vehicle(data: VehicleCreate, db: Session = Depends(get_db), current_user: User = Depends(require_any_page("vehicles", "visits"))):
-    existing = db.query(Vehicle).filter(Vehicle.plate_number == data.plate_number.upper()).first()
+    plate = (data.plate_number or "").strip().upper()
+    existing = find_vehicle_for_plate(db, plate, fuzzy=True)
     if existing:
-        raise HTTPException(status_code=400, detail="Vehicle with this plate number already exists")
+        # Reuse the canonical row instead of spawning an OCR duplicate.
+        return existing
     vehicle = Vehicle(**data.model_dump())
-    vehicle.plate_number = vehicle.plate_number.upper()
+    vehicle.plate_number = plate
     db.add(vehicle)
     db.commit()
     db.refresh(vehicle)
@@ -48,7 +52,7 @@ def create_vehicle(data: VehicleCreate, db: Session = Depends(get_db), current_u
 
 @router.get("/lookup/{plate_number}")
 def lookup_plate(plate_number: str, db: Session = Depends(get_db), current_user: User = Depends(require_any_page("vehicles", "visits"))):
-    vehicle = db.query(Vehicle).filter(Vehicle.plate_number == plate_number.upper()).first()
+    vehicle = find_vehicle_for_plate(db, plate_number, fuzzy=True)
     if not vehicle:
         raise HTTPException(status_code=404, detail="Vehicle not found")
     # Return vehicle with visit count and last visit date
@@ -62,6 +66,15 @@ def lookup_plate(plate_number: str, db: Session = Depends(get_db), current_user:
         **VehicleOut.model_validate(vehicle).model_dump(),
         "last_visit": last_visit.entry_time.isoformat() if last_visit else None,
     }
+
+
+@router.get("/duplicates")
+def list_duplicate_vehicles(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_manager),
+):
+    """Likely-duplicate vehicle groups (OCR misreads) for the merge tool."""
+    return {"groups": find_duplicate_groups(db)}
 
 
 @router.get("/{vehicle_id}", response_model=VehicleOut)
@@ -156,7 +169,7 @@ def get_vehicle_history(
 
 
 @router.patch("/{vehicle_id}", response_model=VehicleOut)
-def update_vehicle(vehicle_id: int, data: VehicleUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def update_vehicle(vehicle_id: int, data: VehicleUpdate, db: Session = Depends(get_db), current_user: User = Depends(require_any_page("vehicles", "visits"))):
     vehicle = db.query(Vehicle).filter(Vehicle.id == vehicle_id).first()
     if not vehicle:
         raise HTTPException(status_code=404, detail="Vehicle not found")
@@ -167,10 +180,116 @@ def update_vehicle(vehicle_id: int, data: VehicleUpdate, db: Session = Depends(g
     return vehicle
 
 
-@router.delete("/{vehicle_id}", status_code=204)
-def delete_vehicle(vehicle_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+@router.patch("/{vehicle_id}/plate")
+def correct_plate(
+    vehicle_id: int,
+    plate_number: str = Body(..., embed=True),
+    merge_if_exists: bool = Body(False, embed=True),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_any_page("vehicles", "visits")),
+):
+    """Fix an OCR-misread plate. If the corrected plate already belongs to
+    another vehicle, returns 409 with that vehicle (or merges this vehicle
+    into it when ``merge_if_exists`` is true)."""
     vehicle = db.query(Vehicle).filter(Vehicle.id == vehicle_id).first()
     if not vehicle:
         raise HTTPException(status_code=404, detail="Vehicle not found")
+    new_plate = (plate_number or "").strip().upper()
+    if len(new_plate) < 2:
+        raise HTTPException(status_code=400, detail="Plate number is too short")
+    old_plate = vehicle.plate_number
+
+    existing = find_vehicle_for_plate(db, new_plate, fuzzy=True)
+    if existing and existing.id != vehicle.id:
+        if not merge_if_exists:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": f"Plate {new_plate} already belongs to vehicle #{existing.id}.",
+                    "existing_vehicle_id": existing.id,
+                    "hint": "Retry with merge_if_exists=true to merge this vehicle into it.",
+                },
+            )
+        stats = merge_vehicles(db, target=existing, source=vehicle)
+        create_audit_log(
+            db,
+            user_id=current_user.id,
+            action="merge",
+            entity_type="vehicle",
+            entity_id=existing.id,
+            description=f"Plate correction {old_plate} → {new_plate}: merged duplicate vehicle",
+            old_values={"plate_number": old_plate},
+            new_values={"plate_number": new_plate, **stats},
+            commit=False,
+        )
+        db.commit()
+        return {"ok": True, "merged_into": existing.id, **stats}
+
+    vehicle.plate_number = new_plate
+    create_audit_log(
+        db,
+        user_id=current_user.id,
+        action="correct_plate",
+        entity_type="vehicle",
+        entity_id=vehicle.id,
+        description=f"Corrected plate {old_plate} → {new_plate}",
+        old_values={"plate_number": old_plate},
+        new_values={"plate_number": new_plate},
+        commit=False,
+    )
+    db.commit()
+    db.refresh(vehicle)
+    return {"ok": True, "vehicle": VehicleOut.model_validate(vehicle).model_dump()}
+
+
+@router.post("/{vehicle_id}/merge")
+def merge_vehicle(
+    vehicle_id: int,
+    source_vehicle_id: int = Body(..., embed=True),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_manager),
+):
+    """Merge ``source_vehicle_id`` (the OCR duplicate) into ``vehicle_id``
+    (the correct record): visits + detections move, duplicate is deleted."""
+    target = db.query(Vehicle).filter(Vehicle.id == vehicle_id).first()
+    source = db.query(Vehicle).filter(Vehicle.id == source_vehicle_id).first()
+    if not target or not source:
+        raise HTTPException(status_code=404, detail="Vehicle not found")
+    if target.id == source.id:
+        raise HTTPException(status_code=400, detail="Cannot merge a vehicle into itself")
+    stats = merge_vehicles(db, target=target, source=source)
+    create_audit_log(
+        db,
+        user_id=current_user.id,
+        action="merge",
+        entity_type="vehicle",
+        entity_id=target.id,
+        description=(
+            f"Merged duplicate {stats['merged_plate']} into {target.plate_number} "
+            f"({stats['visits_moved']} visits, {stats['detections_moved']} detections)"
+        ),
+        new_values=stats,
+        commit=False,
+    )
+    db.commit()
+    return {"ok": True, "target_id": target.id, **stats}
+
+
+@router.delete("/{vehicle_id}", status_code=204)
+def delete_vehicle(vehicle_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_manager)):
+    """Deleting a vehicle removes ALL its visits (cascade) — manager/admin only."""
+    vehicle = db.query(Vehicle).filter(Vehicle.id == vehicle_id).first()
+    if not vehicle:
+        raise HTTPException(status_code=404, detail="Vehicle not found")
+    create_audit_log(
+        db,
+        user_id=current_user.id,
+        action="delete",
+        entity_type="vehicle",
+        entity_id=vehicle.id,
+        description=f"Deleted vehicle {vehicle.plate_number} and its visit history",
+        old_values={"plate_number": vehicle.plate_number, "total_visits": vehicle.total_visits},
+        commit=False,
+    )
     db.delete(vehicle)
     db.commit()
