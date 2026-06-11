@@ -298,10 +298,7 @@ const ServiceDurationChart: React.FC<{ rows: ServiceByTypeRow[]; days: number }>
       {/* Chart body */}
       <div style={{ padding: '20px 24px 24px' }}>
         {/* Column headers */}
-        <div style={{
-          display: 'grid',
-          gridTemplateColumns: 'minmax(140px, 22%) 1fr minmax(72px, 88px)',
-          gap: 16,
+        <div className="fi-chart-header" style={{
           marginBottom: 12,
           paddingBottom: 10,
           borderBottom: '2px solid var(--border-light)',
@@ -337,10 +334,6 @@ const ServiceDurationChart: React.FC<{ rows: ServiceByTypeRow[]; days: number }>
                 key={row.fullName}
                 className="fi-chart-row"
                 style={{
-                  display: 'grid',
-                  gridTemplateColumns: 'minmax(140px, 22%) 1fr minmax(72px, 88px)',
-                  gap: 16,
-                  alignItems: 'center',
                   padding: '12px 8px',
                   borderRadius: 12,
                   position: 'relative',
@@ -728,7 +721,7 @@ const ServiceComparisonView: React.FC<{
           </div>
         </div>
 
-        <div style={{ overflowX: 'auto' }}>
+        <div className="table-scroll">
           <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 920 }}>
             <thead>
               <tr>
@@ -1162,7 +1155,7 @@ export const FleetIntelligence: React.FC = () => {
           )}
 
           {tab === 'type' && (
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr minmax(280px, 360px)', gap: 20, alignItems: 'start' }}>
+            <div className="rsplit" style={{ display: 'grid', gap: 20, alignItems: 'start' }}>
               <div className="card" style={{ padding: '22px 24px', border: '1px solid var(--border-light)' }}>
                 <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 4 }}>Visit duration — Sedan vs SUV</div>
                 <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 20 }}>Whole-visit dwell time by body type</div>
@@ -1196,12 +1189,12 @@ export const FleetIntelligence: React.FC = () => {
                             type="button"
                             onClick={() => setSelectedType(active ? null : r.key)}
                             style={{
-                              display: 'grid', gridTemplateColumns: '100px 1fr 72px 64px',
-                              alignItems: 'center', gap: 12, padding: '12px 14px', borderRadius: 12,
+                              display: 'grid', alignItems: 'center', gap: 12, padding: '12px 14px', borderRadius: 12,
                               border: `1px solid ${active ? col : 'var(--border-light)'}`,
                               background: active ? `${col}0c` : 'var(--bg-base)',
                               cursor: 'pointer', textAlign: 'left', width: '100%',
                             }}
+                            className="fi-type-row"
                           >
                             <span style={{ fontWeight: 700, fontSize: 13, color: col, textTransform: 'capitalize' }}>{r.name}</span>
                             <div style={{ height: 6, background: 'var(--border)', borderRadius: 99, overflow: 'hidden' }}>
@@ -1217,7 +1210,7 @@ export const FleetIntelligence: React.FC = () => {
                 )}
               </div>
 
-              <div className="card" style={{ padding: '20px 22px', border: '1px solid var(--border-light)', position: 'sticky', top: 16 }}>
+              <div className="card fi-insight-sticky" style={{ padding: '20px 22px', border: '1px solid var(--border-light)', position: 'sticky', top: 16 }}>
                 {!selectedType || !typeInsight ? (
                   <div style={{ textAlign: 'center', padding: '32px 16px', color: 'var(--text-muted)', fontSize: 13 }}>
                     Select Sedan or SUV for visit-level stats
@@ -1256,7 +1249,7 @@ export const FleetIntelligence: React.FC = () => {
               {filteredModels.length === 0 ? (
                 <div style={{ padding: 48, textAlign: 'center', color: 'var(--text-muted)' }}>No model data</div>
               ) : (
-                <div style={{ overflowX: 'auto' }}>
+                <div className="table-scroll">
                   <table className="data-table" style={{ borderCollapse: 'collapse' }}>
                     <thead>
                       <tr style={{ background: 'var(--bg-elevated)' }}>
@@ -1284,7 +1277,7 @@ export const FleetIntelligence: React.FC = () => {
                             {open && (
                               <tr>
                                 <td colSpan={6} style={{ padding: '12px 18px 18px', background: 'var(--bg-base)' }}>
-                                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 16 }}>
+                                  <div className="rcols-3" style={{ display: 'grid', gap: 16 }}>
                                     {[
                                       { label: 'Total visits', value: m.count },
                                       { label: 'Total revenue', value: `QAR ${(m.total_revenue ?? 0).toLocaleString()}` },

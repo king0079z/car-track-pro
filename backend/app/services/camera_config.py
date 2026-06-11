@@ -8,7 +8,13 @@ import re
 from copy import deepcopy
 from typing import Any
 
-_CONFIG_FILE = os.path.join(os.path.dirname(__file__), "..", "..", "cameras.json")
+# Cloud deploy stores the camera registry in the bind-mounted data dir so it
+# survives container recreates; local dev falls back to backend/cameras.json.
+_DATA_DIR = os.environ.get("CARTRACK_DATA_DIR")
+if _DATA_DIR and os.path.isdir(_DATA_DIR):
+    _CONFIG_FILE = os.path.join(_DATA_DIR, "cameras.json")
+else:
+    _CONFIG_FILE = os.path.join(os.path.dirname(__file__), "..", "..", "cameras.json")
 
 # Base localhost port for the first Dahua cloud (P2P) tunnel; each extra cloud
 # camera gets the next free port (18554, 18555, ...).
@@ -35,6 +41,14 @@ DEFAULT_DAHUA_HERO_A1: dict[str, Any] = {
     "security_code": "",
     # Cached from cloud /info/device — speeds cloud tunnel start (DH-H3A)
     "p2p_randsalt": "",
+    # Imou / Easy4IP Open Platform (connection_mode=cloud_hls) — cloud HLS path.
+    # Secrets normally come from env (IMOU_APP_ID/IMOU_APP_SECRET); kept here so
+    # the resolver can read them from the camera cfg too.
+    "openapi_app_id": "",
+    "openapi_app_secret": "",
+    "openapi_base_url": "",
+    "openapi_channel": "0",
+    "openapi_prefer_hd": True,
 }
 
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -44,6 +58,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
 
 def _normalize_connection_mode(raw: str | None) -> str:
     s = str(raw or "lan").strip().lower()
+    if s in ("cloud_hls", "easy4ip", "openapi", "imou", "easy4ip_hls"):
+        return "cloud_hls"
     if s in ("p2p", "cloud", "remote"):
         return "p2p"
     if s == "auto":
@@ -69,7 +85,13 @@ def _env_dahua_overrides() -> dict[str, Any]:
     mode = _normalize_connection_mode(settings.DAHUA_CONNECTION_MODE or "p2p")
 
     has_credentials = bool(serial and password)
-    has_any = has_credentials or settings.DAHUA_ENABLED or bool(host)
+    # Cloud HLS only needs the serial + OpenAPI app creds (no device password).
+    _imou_ready = bool(
+        (getattr(settings, "IMOU_APP_ID", "") or "").strip()
+        and (getattr(settings, "IMOU_APP_SECRET", "") or "").strip()
+    )
+    has_cloud_hls = mode == "cloud_hls" and bool(serial) and _imou_ready
+    has_any = has_credentials or has_cloud_hls or settings.DAHUA_ENABLED or bool(host)
     if not has_any:
         return {}
 
@@ -78,6 +100,19 @@ def _env_dahua_overrides() -> dict[str, Any]:
         patch["device_serial"] = serial
     if password:
         patch["password"] = password
+
+    # Imou/Easy4IP Open Platform creds for the cloud_hls path.
+    app_id = (getattr(settings, "IMOU_APP_ID", "") or "").strip()
+    app_secret = (getattr(settings, "IMOU_APP_SECRET", "") or "").strip()
+    if app_id:
+        patch["openapi_app_id"] = app_id
+    if app_secret:
+        patch["openapi_app_secret"] = app_secret
+    base_url = (getattr(settings, "IMOU_BASE_URL", "") or "").strip()
+    if base_url:
+        patch["openapi_base_url"] = base_url
+    patch["openapi_channel"] = (getattr(settings, "IMOU_CHANNEL", "") or "0").strip() or "0"
+    patch["openapi_prefer_hd"] = bool(getattr(settings, "IMOU_PREFER_HD", True))
     if username:
         patch["username"] = username
     if host:
@@ -98,6 +133,9 @@ def _env_dahua_overrides() -> dict[str, Any]:
         patch["enabled"] = True
     elif has_credentials and mode in ("p2p", "auto"):
         # Cloud VPS: serial + password + p2p mode → enable without extra flag
+        patch["enabled"] = True
+    elif has_cloud_hls:
+        # Cloud VPS: serial + OpenAPI creds + cloud_hls mode → enable automatically
         patch["enabled"] = True
 
     return patch
@@ -206,12 +244,20 @@ DEFAULT_CAMERA: dict[str, Any] = {
     "password": "",
     "stream": "sub",
     "use_tcp_transport": True,
+    # Imou / Easy4IP Open Platform (connection_mode=cloud_hls)
+    "openapi_app_id": "",
+    "openapi_app_secret": "",
+    "openapi_base_url": "",
+    "openapi_channel": "0",
+    "openapi_prefer_hd": True,
     # Generic RTSP / NVR
     "rtsp_url": "",
     # Per-camera speed calibration: metres represented by one pixel of motion.
     # 0 = use the global default (settings.YOLO11_METER_PER_PIXEL). Set this from
     # a known reference (lane width / two ground points) for accurate speed.
     "meter_per_pixel": 0.0,
+    # Service bay this camera monitors (auto-fills work orders from ANPR).
+    "assigned_bay": None,
 }
 
 
@@ -281,6 +327,11 @@ def _hero_as_camera() -> dict[str, Any] | None:
         "password": cfg.get("password", ""),
         "stream": cfg.get("stream", "sub"),
         "use_tcp_transport": cfg.get("use_tcp_transport", True),
+        "openapi_app_id": cfg.get("openapi_app_id", ""),
+        "openapi_app_secret": cfg.get("openapi_app_secret", ""),
+        "openapi_base_url": cfg.get("openapi_base_url", ""),
+        "openapi_channel": cfg.get("openapi_channel", "0"),
+        "openapi_prefer_hd": cfg.get("openapi_prefer_hd", True),
     })
 
 
@@ -374,11 +425,11 @@ def sanitize_camera_patch(body: dict[str, Any]) -> dict[str, Any]:
             continue
         if key == "label":
             out["name"] = str(val).strip() if val is not None else ""
-        elif key in ("enabled", "use_tcp_transport"):
+        elif key in ("enabled", "use_tcp_transport", "openapi_prefer_hd"):
             out[key] = bool(val) if isinstance(val, bool) else str(val).lower() in ("1", "true", "yes", "on")
-        elif key in ("rtsp_port", "http_port", "p2p_local_port", "slot_index"):
+        elif key in ("rtsp_port", "http_port", "p2p_local_port", "slot_index", "assigned_bay"):
             try:
-                out[key] = int(val)
+                out[key] = int(val) if val not in (None, "") else None
             except (TypeError, ValueError):
                 continue
         elif key == "meter_per_pixel":

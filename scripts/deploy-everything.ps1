@@ -36,14 +36,33 @@ param(
 $ErrorActionPreference = "Stop"
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 
+function Import-DeployLocalEnv {
+  $f = Join-Path $PSScriptRoot ".env.deploy.local"
+  if (-not (Test-Path $f)) { return }
+  Get-Content $f | ForEach-Object {
+    $line = $_.Trim()
+    if (-not $line -or $line.StartsWith("#")) { return }
+    $i = $line.IndexOf("=")
+    if ($i -lt 1) { return }
+    $k = $line.Substring(0, $i).Trim()
+    $v = $line.Substring($i + 1).Trim()
+    if ($k -and $v) { Set-Item -Path "env:$k" -Value $v }
+  }
+}
+Import-DeployLocalEnv
+if (-not $DuckDnsToken) { $DuckDnsToken = $env:CARTRACK_DUCKDNS_TOKEN }
+if (-not $CameraPassword) { $CameraPassword = $env:CARTRACK_CAMERA_PASSWORD }
+if (-not $HfToken) { $HfToken = $env:CARTRACK_HF_TOKEN }
+if (-not $HfSpaceId) { $HfSpaceId = $env:CARTRACK_HF_SPACE }
+
 function Step($m) { Write-Host ""; Write-Host "==> $m" -ForegroundColor Cyan }
 function Ok($m)   { Write-Host "    $m" -ForegroundColor Green }
 function Warn($m)  { Write-Host "    $m" -ForegroundColor Yellow }
 
 Write-Host ""
-Write-Host "╔══════════════════════════════════════════════════════════╗" -ForegroundColor Cyan
-Write-Host "║  CarTrack — Deploy EVERYTHING                            ║" -ForegroundColor Cyan
-Write-Host "╚══════════════════════════════════════════════════════════╝" -ForegroundColor Cyan
+Write-Host "============================================================" -ForegroundColor Cyan
+Write-Host "  CarTrack - Deploy EVERYTHING" -ForegroundColor Cyan
+Write-Host "============================================================" -ForegroundColor Cyan
 
 # ── Collect secrets ─────────────────────────────────────────────────────────
 if (-not $DuckDnsToken) {
@@ -58,7 +77,7 @@ if (-not $CameraPassword -and -not $SkipHetzner) {
 
 # ── [1] Git push ────────────────────────────────────────────────────────────
 if (-not $SkipGitPush) {
-  Step "[1/4] Pushing latest code to GitHub"
+  Step '[1/4] Pushing latest code to GitHub'
   Push-Location $Root
   try {
     $dirty = git status --porcelain 2>&1
@@ -68,29 +87,22 @@ if (-not $SkipGitPush) {
         backend/pyproject.toml backend/tests/test_dahua_camera.py backend/tests/test_live_24_7.py `
         backend/tests/test_live_plate_filter.py deploy/huggingface/ 2>$null
       git add -u backend/pytest.ini 2>$null
-      git commit -m "$( @"
-Add Hetzner/VPS/HF deployment tooling and 24/7 cloud ANPR config.
-
-- deploy-to-hetzner.ps1 + bootstrap-vps.sh for one-command VPS install
-- LIVE_RTSP_URL env camera for relay-based cloud hosts
-- HF Dockerfile 24/7-capable; pytest testpaths fix
-- Plate consolidation guard + stale test fixes
-"@ )" 2>$null
+      git commit -m "Update deployment scripts and cloud config" 2>$null
       if ($LASTEXITCODE -ne 0) { Warn "Nothing new to commit (or commit skipped)." }
     }
     git push origin HEAD 2>&1 | ForEach-Object { Write-Host $_ }
-    if ($LASTEXITCODE -eq 0) { Ok "GitHub updated — VPS bootstrap can clone latest." }
-    else { Warn "git push failed — push manually, then re-run with -SkipGitPush" }
+    if ($LASTEXITCODE -eq 0) { Ok "GitHub updated - VPS bootstrap can clone latest." }
+    else { Warn "git push failed - push manually, then re-run with -SkipGitPush" }
   } finally {
     Pop-Location
   }
 } else {
-  Step "[1/4] Skipping git push (-SkipGitPush)"
+  Step '[1/4] Skipping git push (-SkipGitPush)'
 }
 
 # ── [2] Hetzner VPS ─────────────────────────────────────────────────────────
 if (-not $SkipHetzner) {
-  Step "[2/4] Hetzner VPS — live 24/7 ANPR at https://$Domain"
+  Step ('[2/4] Hetzner VPS - live ANPR at https://' + $Domain)
   & (Join-Path $PSScriptRoot "deploy-to-hetzner.ps1") `
     -VpsIp $VpsIp `
     -Domain $Domain `
@@ -99,12 +111,12 @@ if (-not $SkipHetzner) {
     -RepoUrl $RepoUrl
   Ok "Hetzner deploy finished."
 } else {
-  Step "[2/4] Skipping Hetzner (-SkipHetzner)"
+  Step '[2/4] Skipping Hetzner (-SkipHetzner)'
 }
 
 # ── [3] Hugging Face (optional) ─────────────────────────────────────────────
 if (-not $SkipHuggingFace) {
-  Step "[3/4] Hugging Face Space (upload-video demo)"
+  Step '[3/4] Hugging Face Space (upload-video demo)'
   if (-not $HfToken) {
     $doHf = Read-Host "Push HF Space too? Needs hf_ write token (y/N)"
     if ($doHf -eq "y") {
@@ -119,33 +131,31 @@ if (-not $SkipHuggingFace) {
     }
     & (Join-Path $Root "deploy\huggingface\push-to-space.ps1") `
       -SpaceId $HfSpaceId -HfToken $HfToken
-    Ok "HF push done — build at https://huggingface.co/spaces/$HfSpaceId"
+    Ok "HF push done - build at https://huggingface.co/spaces/$HfSpaceId"
   }
 } else {
-  Step "[3/4] Skipping Hugging Face (-SkipHuggingFace)"
+  Step '[3/4] Skipping Hugging Face (-SkipHuggingFace)'
 }
 
 # ── [4] Vercel hint ─────────────────────────────────────────────────────────
 if (-not $SkipVercelHint) {
-  Step "[4/4] Vercel frontend (optional split UI)"
+  Step '[4/4] Vercel frontend (optional split UI)'
   $apiUrl = "https://$Domain"
-  Write-Host @"
-
-  If you also use Vercel for the UI, set:
-    VITE_API_URL = $apiUrl
-  Then redeploy frontend.
-
-  Or skip Vercel — the VPS already serves the full app at:
-    https://$Domain
-
-"@ -ForegroundColor White
+  Write-Host ""
+  Write-Host "  If you also use Vercel for the UI, set:" -ForegroundColor White
+  Write-Host "    VITE_API_URL = $apiUrl" -ForegroundColor White
+  Write-Host "  Then redeploy frontend." -ForegroundColor White
+  Write-Host ""
+  Write-Host "  Or skip Vercel - the VPS already serves the full app at:" -ForegroundColor White
+  Write-Host "    https://$Domain" -ForegroundColor White
+  Write-Host ""
 }
 
 Write-Host ""
-Write-Host "══════════════════════════════════════════════════════════════" -ForegroundColor Green
+Write-Host "============================================================" -ForegroundColor Green
 Write-Host " ALL DEPLOYMENTS COMPLETE" -ForegroundColor Green
-Write-Host "  Primary (24/7 live):  https://$Domain" -ForegroundColor Green
+Write-Host "  Primary (24-7 live):  https://$Domain" -ForegroundColor Green
 Write-Host "  Login:               admin / demo1234" -ForegroundColor Green
 Write-Host "  Health:              https://$Domain/api/health" -ForegroundColor Green
-Write-Host "══════════════════════════════════════════════════════════════" -ForegroundColor Green
+Write-Host "============================================================" -ForegroundColor Green
 Write-Host ""

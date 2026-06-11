@@ -7,8 +7,9 @@ from ..models.visit import Visit
 from ..models.service import ServiceItem
 from ..schemas.vehicle import VehicleCreate, VehicleUpdate, VehicleOut
 from ..schemas.visit import VisitOut
-from ..utils.auth import get_current_user
+from ..utils.auth import get_current_user, require_page, require_any_page
 from ..models.user import User
+from ..services.permissions import apply_visit_scope
 
 router = APIRouter(prefix="/api/vehicles", tags=["Vehicles"])
 
@@ -19,7 +20,7 @@ def list_vehicles(
     skip: int = 0,
     limit: int = 50,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_page("vehicles"))
 ):
     q = db.query(Vehicle)
     if search:
@@ -33,7 +34,7 @@ def list_vehicles(
 
 
 @router.post("",  response_model=VehicleOut, status_code=201)
-def create_vehicle(data: VehicleCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def create_vehicle(data: VehicleCreate, db: Session = Depends(get_db), current_user: User = Depends(require_any_page("vehicles", "visits"))):
     existing = db.query(Vehicle).filter(Vehicle.plate_number == data.plate_number.upper()).first()
     if existing:
         raise HTTPException(status_code=400, detail="Vehicle with this plate number already exists")
@@ -46,7 +47,7 @@ def create_vehicle(data: VehicleCreate, db: Session = Depends(get_db), current_u
 
 
 @router.get("/lookup/{plate_number}")
-def lookup_plate(plate_number: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def lookup_plate(plate_number: str, db: Session = Depends(get_db), current_user: User = Depends(require_any_page("vehicles", "visits"))):
     vehicle = db.query(Vehicle).filter(Vehicle.plate_number == plate_number.upper()).first()
     if not vehicle:
         raise HTTPException(status_code=404, detail="Vehicle not found")
@@ -64,7 +65,7 @@ def lookup_plate(plate_number: str, db: Session = Depends(get_db), current_user:
 
 
 @router.get("/{vehicle_id}", response_model=VehicleOut)
-def get_vehicle(vehicle_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def get_vehicle(vehicle_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_page("vehicles"))):
     vehicle = db.query(Vehicle).filter(Vehicle.id == vehicle_id).first()
     if not vehicle:
         raise HTTPException(status_code=404, detail="Vehicle not found")
@@ -76,7 +77,7 @@ def get_vehicle_history(
     vehicle_id: int,
     limit: int = Query(default=50, le=200),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_any_page("vehicles", "visits"))
 ):
     """Full visit history for a vehicle with services and staff."""
     vehicle = db.query(Vehicle).filter(Vehicle.id == vehicle_id).first()
@@ -84,13 +85,16 @@ def get_vehicle_history(
         raise HTTPException(status_code=404, detail="Vehicle not found")
 
     visits = (
-        db.query(Visit)
-        .options(
-            joinedload(Visit.created_by_user),
-            joinedload(Visit.service_items).joinedload(ServiceItem.service),
-            joinedload(Visit.service_items).joinedload(ServiceItem.assigned_staff),
+        apply_visit_scope(
+            db.query(Visit)
+            .options(
+                joinedload(Visit.created_by_user),
+                joinedload(Visit.service_items).joinedload(ServiceItem.service),
+                joinedload(Visit.service_items).joinedload(ServiceItem.assigned_staff),
+            )
+            .filter(Visit.vehicle_id == vehicle_id),
+            current_user,
         )
-        .filter(Visit.vehicle_id == vehicle_id)
         .order_by(Visit.entry_time.desc())
         .limit(limit)
         .all()

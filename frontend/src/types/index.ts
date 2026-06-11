@@ -11,7 +11,22 @@ export interface User {
   is_active: boolean;
   last_login?: string;
   created_at: string;
+  allowed_pages?: PageKey[];
+  custom_page_permissions?: PageKey[] | null;
 }
+
+export type PageKey =
+  | 'dashboard'
+  | 'visits'
+  | 'vehicles'
+  | 'fleet'
+  | 'services'
+  | 'analytics'
+  | 'visionflow'
+  | 'visionflow_multicam'
+  | 'users'
+  | 'audit'
+  | 'settings';
 
 export interface AuthState {
   user: User | null;
@@ -91,6 +106,8 @@ export interface InShopVehicle {
   minutes_in_shop?: number | null;
   service_summary?: string | null;
   anpr_detection_ids?: number[] | null;
+  suggested_bay?: number | null;
+  camera_name?: string | null;
 }
 
 export interface Visit {
@@ -98,11 +115,13 @@ export interface Visit {
   visit_number: string;
   vehicle_id: number;
   vehicle: Vehicle;
+  created_by_user?: { id: number; full_name: string; username?: string } | null;
   assigned_bay?: number;
   entry_time: string;
   exit_time?: string;
   duration_minutes?: number;
   anpr_camera_seconds?: number | null;
+  anpr_camera_name?: string | null;
   status: VisitStatus;
   entry_method: EntryMethod;
   plate_image_url?: string;

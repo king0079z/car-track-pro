@@ -21,6 +21,8 @@ import {
 } from '../../lib/qatarTime';
 import toast from 'react-hot-toast';
 import type { Visit, VisitStatus } from '../../types';
+import { useAuth } from '../../contexts/AuthContext';
+import { isOrgWideUser } from '../../lib/permissions';
 
 function useLiveTimer(entryTime: string) {
   const [mins, setMins] = useState(() =>
@@ -161,12 +163,11 @@ const VisitExpandPanel: React.FC<{
 }> = ({ visit, onCheckout, onDelete, onOpen }) => {
   const active = ['waiting', 'in_service', 'on_hold'].includes(visit.status);
   return (
-    <div style={{
+    <div className="expand-panel" style={{
       background: 'linear-gradient(180deg, rgba(59,130,246,0.04) 0%, var(--bg-base) 100%)',
       borderTop: '1px solid var(--border-light)',
-      padding: '18px 20px 20px 62px',
     }}>
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 16, alignItems: 'start' }}>
+      <div className="rcols-1-auto" style={{ display: 'grid', gap: 16, alignItems: 'start' }}>
         <div>
           <div style={{ fontSize: 11, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--text-muted)', marginBottom: 12 }}>
             Visit details
@@ -264,6 +265,8 @@ function exportCSV(visits: Visit[]) {
 export const VisitsList: React.FC = () => {
   const navigate = useNavigate();
   const qc = useQueryClient();
+  const { user } = useAuth();
+  const orgWide = isOrgWideUser(user);
   const [search, setSearch] = useState('');
   const [status, setStatus] = useState<VisitStatus | ''>('');
   const [dateFilter, setDateFilter] = useState('all');
@@ -444,10 +447,18 @@ export const VisitsList: React.FC = () => {
                   </span>
                 </div>
                 <p style={{ margin: 0, fontSize: 13.5, color: 'var(--text-secondary)', maxWidth: 540, lineHeight: 1.65 }}>
-                  Command center for every shop entry — durations update while cars are on-site. Tie-ins with{' '}
-                  <Link to="/analytics" style={{ color: 'var(--text-accent)', fontWeight: 700 }}>Analytics</Link>,{' '}
-                  <Link to="/visionflow" style={{ color: 'var(--text-accent)', fontWeight: 700 }}>ANPR</Link>, and{' '}
-                  <Link to="/vehicles" style={{ color: 'var(--text-accent)', fontWeight: 700 }}>Vehicles</Link>.
+                  {orgWide ? (
+                    <>
+                      Command center for every shop entry — durations update while cars are on-site. Tie-ins with{' '}
+                      <Link to="/analytics" style={{ color: 'var(--text-accent)', fontWeight: 700 }}>Analytics</Link>,{' '}
+                      <Link to="/visionflow" style={{ color: 'var(--text-accent)', fontWeight: 700 }}>ANPR</Link>, and{' '}
+                      <Link to="/vehicles" style={{ color: 'var(--text-accent)', fontWeight: 700 }}>Vehicles</Link>.
+                    </>
+                  ) : (
+                    <>
+                      Your work orders — only visits you created or signed appear here. Create a new order anytime; your name is applied automatically at sign-off.
+                    </>
+                  )}
                 </p>
               </div>
             </div>
@@ -658,7 +669,7 @@ export const VisitsList: React.FC = () => {
           </div>
         ) : (
           <>
-            <div style={{ overflowX: 'auto' }}>
+            <div className="table-scroll">
               <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 980 }}>
                 <thead>
                   <tr>
@@ -773,8 +784,7 @@ export const VisitsList: React.FC = () => {
 
             {/* Pagination */}
             {totalPages > 1 && (
-              <div style={{
-                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+              <div className="pagination-bar" style={{
                 padding: '14px 20px', borderTop: '1px solid var(--border-light)',
                 background: 'var(--bg-base)',
               }}>

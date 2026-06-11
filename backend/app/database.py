@@ -6,9 +6,20 @@ from .config import settings
 is_sqlite = settings.DATABASE_URL.startswith("sqlite")
 is_mysql = "mysql" in settings.DATABASE_URL
 
+# WAL lets readers and a single writer proceed concurrently, so request handlers
+# never block behind a writer (the cause of pool exhaustion under TRUNCATE, where
+# every write takes an exclusive whole-DB lock). WAL is only safe when the -wal /
+# -shm sidecars persist; in the cloud deploy we bind-mount the *directory* that
+# holds the .db (CARTRACK_DATA_DIR=/app/data) so the sidecars survive redeploys.
 engine_kwargs: dict = {"pool_pre_ping": True}
 if is_sqlite:
-    engine_kwargs["connect_args"] = {"check_same_thread": False, "timeout": 15}
+    engine_kwargs["connect_args"] = {"check_same_thread": False, "timeout": 30}
+    # The lifespan thread pool (16 workers) + uvicorn + background loops can each
+    # hold a connection; size the pool so reads never starve under WAL.
+    engine_kwargs["pool_size"] = 20
+    engine_kwargs["max_overflow"] = 30
+    engine_kwargs["pool_timeout"] = 30
+    engine_kwargs["pool_recycle"] = 1800
 elif is_mysql:
     engine_kwargs["connect_args"] = {"charset": "utf8mb4"}
     engine_kwargs["pool_size"] = 10
@@ -25,9 +36,25 @@ if is_sqlite:
     def _sqlite_pragmas(dbapi_connection, _connection_record):
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA journal_mode=WAL")
-        cursor.execute("PRAGMA busy_timeout=15000")
+        cursor.execute("PRAGMA busy_timeout=30000")
         cursor.execute("PRAGMA synchronous=NORMAL")
+        # Fold the WAL back into the main .db regularly so a redeploy that happens
+        # to recreate the container never leaves recent rows stranded in -wal.
+        cursor.execute("PRAGMA wal_autocheckpoint=400")
         cursor.close()
+
+
+def checkpoint_wal() -> None:
+    """Fold the -wal sidecar into the main .db (call on graceful shutdown)."""
+    if not is_sqlite:
+        return
+    try:
+        from sqlalchemy import text
+
+        with engine.begin() as conn:
+            conn.execute(text("PRAGMA wal_checkpoint(TRUNCATE)"))
+    except Exception:
+        pass
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
@@ -156,6 +183,23 @@ def _ensure_visit_anpr_and_detection_timing_columns():
         pass
 
 
+def _ensure_users_allowed_pages_column():
+    """Add users.allowed_pages when upgrading existing DBs."""
+    from sqlalchemy import inspect, text
+
+    try:
+        insp = inspect(engine)
+        if "users" not in insp.get_table_names():
+            return
+        ucols = {c["name"] for c in insp.get_columns("users")}
+        if "allowed_pages" in ucols:
+            return
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE users ADD COLUMN allowed_pages TEXT"))
+    except Exception:
+        pass
+
+
 def init_db():
     from .models import vehicle, visit, service, user, audit, anpr, application_error  # noqa
     Base.metadata.create_all(bind=engine)
@@ -164,3 +208,4 @@ def init_db():
     _sqlite_add_missing_audit_columns()
     _ensure_audit_description_column_mysql_pg()
     _ensure_visit_anpr_and_detection_timing_columns()
+    _ensure_users_allowed_pages_column()

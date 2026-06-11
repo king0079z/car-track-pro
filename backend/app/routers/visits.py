@@ -9,12 +9,14 @@ from ..models.anpr import ANPRDetection
 from ..models.service import ServiceItem, Service
 from ..schemas.visit import VisitCreate, VisitUpdate, VisitOut, InShopVehicleOut
 from ..schemas.service import ServiceItemCreate, ServiceItemUpdate
-from ..utils.auth import get_current_user
+from ..utils.auth import get_current_user, require_page
 from ..utils.helpers import generate_visit_number, calculate_duration
 from ..models.user import User
 from ..services.audit_service import create_audit_log
 from ..services.service_duration import sync_visit_shop_duration
 from ..services.camera_presence import freeze_visit_camera_recording
+from ..services.bay_inference import resolve_bay_for_detection
+from ..services.permissions import user_owns_visit, apply_visit_scope, has_org_wide_access
 from ..utils.qatar_time import qatar_day_start_end, qatar_today
 
 router = APIRouter(prefix="/api/visits", tags=["Visits"])
@@ -63,7 +65,25 @@ def _apply_anpr_links_on_create(
             visit.entry_time = datetime.now(UTC) - timedelta(seconds=anchor)
 
 
-def _load_visit(db: Session, visit_id: int) -> Visit:
+def _visit_out(db: Session, visit: Visit) -> VisitOut:
+    """Serialize visit with ANPR camera context for the UI."""
+    base = VisitOut.model_validate(visit)
+    det = (
+        db.query(ANPRDetection)
+        .filter(ANPRDetection.visit_id == visit.id)
+        .order_by(ANPRDetection.detected_at.desc())
+        .first()
+    )
+    if not det:
+        return base
+    info = resolve_bay_for_detection(det)
+    cam_name = info.get("camera_name")
+    if cam_name:
+        return base.model_copy(update={"anpr_camera_name": cam_name})
+    return base
+
+
+def _load_visit(db: Session, visit_id: int, current_user: User | None = None) -> Visit:
     visit = (
         db.query(Visit)
         .options(
@@ -80,6 +100,8 @@ def _load_visit(db: Session, visit_id: int) -> Visit:
     )
     if not visit:
         raise HTTPException(status_code=404, detail="Visit not found")
+    if current_user and not user_owns_visit(current_user, visit):
+        raise HTTPException(status_code=404, detail="Visit not found")
     return visit
 
 
@@ -95,7 +117,7 @@ def list_visits(
     skip: int = 0,
     limit: int = Query(50, ge=1, le=500),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_page("visits"))
 ):
     q = (
         db.query(Visit)
@@ -124,11 +146,12 @@ def list_visits(
         q = q.join(Vehicle).filter(Vehicle.plate_number.ilike(f"%{plate}%"))
     if vehicle_id is not None:
         q = q.filter(Visit.vehicle_id == vehicle_id)
+    q = apply_visit_scope(q, current_user)
     return q.order_by(Visit.entry_time.desc()).offset(skip).limit(limit).all()
 
 
 @router.post("",  response_model=VisitOut, status_code=201)
-def create_visit(data: VisitCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def create_visit(data: VisitCreate, db: Session = Depends(get_db), current_user: User = Depends(require_page("visits"))):
     # Resolve vehicle
     vehicle = None
     if data.vehicle_id:
@@ -170,12 +193,21 @@ def create_visit(data: VisitCreate, db: Session = Depends(get_db), current_user:
     if len(raw_anpr) > _MAX_ANPR_LINK:
         raise HTTPException(status_code=400, detail=f"Too many ANPR detection ids (max {_MAX_ANPR_LINK})")
 
+    assigned_bay = data.assigned_bay
+    if assigned_bay is None and raw_anpr:
+        dets = db.query(ANPRDetection).filter(ANPRDetection.id.in_(raw_anpr)).all()
+        for d in dets:
+            info = resolve_bay_for_detection(d)
+            if info.get("bay"):
+                assigned_bay = int(info["bay"])
+                break
+
     sig = data.supervisor_signature or data.customer_signature
     visit = Visit(
         visit_number=generate_visit_number(),
         vehicle_id=vehicle.id,
         created_by=current_user.id,
-        assigned_bay=data.assigned_bay,
+        assigned_bay=assigned_bay,
         entry_method=data.entry_method,
         customer_name=data.customer_name or vehicle.owner_name,
         customer_phone=data.customer_phone or vehicle.owner_phone,
@@ -225,28 +257,27 @@ def create_visit(data: VisitCreate, db: Session = Depends(get_db), current_user:
         freeze_visit_camera_recording(db, visit)
         sync_visit_shop_duration(db, visit)
     db.commit()
-    return _load_visit(db, visit.id)
+    return _visit_out(db, _load_visit(db, visit.id))
 
 
 @router.get("/in-shop", response_model=List[InShopVehicleOut])
 def list_in_shop_vehicles(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_page("visits")),
 ):
     """
     Vehicles currently on the shop floor — open work orders plus camera-detected plates
     awaiting registration (no exit / not completed).
     """
-    active = (
+    active_q = (
         db.query(Visit)
         .options(
             joinedload(Visit.vehicle),
             joinedload(Visit.service_items).joinedload(ServiceItem.service),
         )
         .filter(Visit.status.in_([VisitStatus.WAITING, VisitStatus.IN_SERVICE, VisitStatus.ON_HOLD]))
-        .order_by(Visit.entry_time.asc())
-        .all()
     )
+    active = apply_visit_scope(active_q, current_user).order_by(Visit.entry_time.asc()).all()
 
     plates_with_wo: set[str] = set()
     out: list[InShopVehicleOut] = []
@@ -299,6 +330,8 @@ def list_in_shop_vehicles(
 
     for plate, dets in anpr_by_plate.items():
         vehicle = db.query(Vehicle).filter(Vehicle.plate_number == plate).first()
+        primary = dets[0] if dets else None
+        bay_info = resolve_bay_for_detection(primary) if primary else {}
         out.append(
             InShopVehicleOut(
                 plate_number=plate,
@@ -309,6 +342,8 @@ def list_in_shop_vehicles(
                 color=vehicle.color if vehicle else None,
                 customer_name=vehicle.owner_name if vehicle else None,
                 anpr_detection_ids=[d.id for d in dets[:24]],
+                suggested_bay=bay_info.get("bay"),
+                camera_name=bay_info.get("camera_name"),
             )
         )
 
@@ -316,20 +351,18 @@ def list_in_shop_vehicles(
 
 
 @router.get("/active", response_model=List[VisitOut])
-def get_active_visits(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    visits = (
+def get_active_visits(db: Session = Depends(get_db), current_user: User = Depends(require_page("visits"))):
+    q = (
         db.query(Visit)
         .options(joinedload(Visit.vehicle), joinedload(Visit.service_items).joinedload(ServiceItem.service))
         .filter(Visit.status.in_([VisitStatus.WAITING, VisitStatus.IN_SERVICE, VisitStatus.ON_HOLD]))
-        .order_by(Visit.entry_time.asc())
-        .all()
     )
-    return visits
+    return apply_visit_scope(q, current_user).order_by(Visit.entry_time.asc()).all()
 
 
 @router.get("/{visit_id}", response_model=VisitOut)
-def get_visit(visit_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    return _load_visit(db, visit_id)
+def get_visit(visit_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_page("visits"))):
+    return _visit_out(db, _load_visit(db, visit_id, current_user))
 
 
 @router.patch("/{visit_id}", response_model=VisitOut)
@@ -337,9 +370,9 @@ def update_visit(
     visit_id: int,
     data: VisitUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_page("visits")),
 ):
-    visit = _load_visit(db, visit_id)
+    visit = _load_visit(db, visit_id, current_user)
     update_data = data.model_dump(exclude_unset=True)
 
     if "status" in update_data and update_data["status"] == VisitStatus.COMPLETED:
@@ -359,12 +392,12 @@ def update_visit(
         visit.duration_minutes = calculate_duration(visit.entry_time, visit.exit_time)
 
     db.commit()
-    return _load_visit(db, visit.id)
+    return _load_visit(db, visit.id, current_user)
 
 
 @router.post("/{visit_id}/checkout", response_model=VisitOut)
 def checkout_visit(visit_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    visit = _load_visit(db, visit_id)
+    visit = _load_visit(db, visit_id, current_user)
     visit.exit_time = datetime.now(UTC)
     visit.status = VisitStatus.COMPLETED
     visit.duration_minutes = calculate_duration(visit.entry_time, visit.exit_time)
@@ -382,7 +415,7 @@ def checkout_visit(visit_id: int, db: Session = Depends(get_db), current_user: U
         commit=False,
     )
     db.commit()
-    return _load_visit(db, visit.id)
+    return _load_visit(db, visit.id, current_user)
 
 
 @router.post("/{visit_id}/signature", response_model=VisitOut)
@@ -390,9 +423,9 @@ def capture_signature(
     visit_id: int,
     payload: dict,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_page("visits"))
 ):
-    visit = _load_visit(db, visit_id)
+    visit = _load_visit(db, visit_id, current_user)
     sig = payload.get("supervisor_signature") or payload.get("signature")
     visit.supervisor_signature = sig
     visit.supervisor_signed_by = current_user.id if sig else None
@@ -401,7 +434,7 @@ def capture_signature(
         freeze_visit_camera_recording(db, visit)
         sync_visit_shop_duration(db, visit)
     db.commit()
-    return _load_visit(db, visit.id)
+    return _load_visit(db, visit.id, current_user)
 
 
 def _recalc_visit_total(db: Session, visit: Visit) -> None:
@@ -414,9 +447,9 @@ def add_service_item(
     visit_id: int,
     data: ServiceItemCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_page("visits")),
 ):
-    visit = _load_visit(db, visit_id)
+    visit = _load_visit(db, visit_id, current_user)
     if visit.status == VisitStatus.COMPLETED:
         raise HTTPException(status_code=400, detail="Cannot add services to a completed visit")
     svc = db.query(Service).filter(Service.id == data.service_id).first()
@@ -432,15 +465,15 @@ def add_service_item(
     db.add(item)
     _recalc_visit_total(db, visit)
     db.commit()
-    return _load_visit(db, visit_id)
+    return _load_visit(db, visit_id, current_user)
 
 
 @router.patch("/{visit_id}/services/{item_id}", response_model=VisitOut)
 def update_service_item(
     visit_id: int, item_id: int, data: ServiceItemUpdate,
-    db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
+    db: Session = Depends(get_db), current_user: User = Depends(require_page("visits"))
 ):
-    visit = _load_visit(db, visit_id)
+    visit = _load_visit(db, visit_id, current_user)
     item = db.query(ServiceItem).filter(ServiceItem.id == item_id, ServiceItem.visit_id == visit_id).first()
     if not item:
         raise HTTPException(status_code=404, detail="Service item not found")
@@ -450,14 +483,12 @@ def update_service_item(
         item.actual_duration_minutes = calculate_duration(item.started_at, item.completed_at)
     _recalc_visit_total(db, visit)
     db.commit()
-    return _load_visit(db, visit_id)
+    return _load_visit(db, visit_id, current_user)
 
 
 @router.delete("/{visit_id}", status_code=204)
-def delete_visit(visit_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    visit = db.query(Visit).filter(Visit.id == visit_id).first()
-    if not visit:
-        raise HTTPException(status_code=404, detail="Visit not found")
+def delete_visit(visit_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_page("visits"))):
+    visit = _load_visit(db, visit_id, current_user)
     num = visit.visit_number
     create_audit_log(
         db,

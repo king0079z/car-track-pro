@@ -34,10 +34,14 @@ from ..config import settings
 _log = logging.getLogger(__name__)
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
+# In the cloud deploy CARTRACK_DATA_DIR (e.g. /app/data) is a bind-mounted folder
+# so every SQLite file *and* its WAL sidecars persist across container recreates.
+# Absent the env var (local dev) we keep the historical backend-dir locations.
+_DATA_DIR = Path(os.environ.get("CARTRACK_DATA_DIR") or _BACKEND_DIR)
 UPLOAD_DIR = _BACKEND_DIR / "uploads"
 OUTPUT_DIR = _BACKEND_DIR / "outputs"
-HISTORY_DB = _BACKEND_DIR / "analysis_history.db"
-LIVE_SESSIONS_DB = _BACKEND_DIR / "live_sessions.db"
+HISTORY_DB = _DATA_DIR / "analysis_history.db"
+LIVE_SESSIONS_DB = _DATA_DIR / "live_sessions.db"
 
 ALLOWED_EXT = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".m4v"}
 
@@ -1165,6 +1169,9 @@ def _grid_slot_payload(slot: int, *, probe_map: dict[int, dict] | None = None) -
             camera_available = None
     else:
         camera_available = None
+    from ..services.dahua_camera import ptz_info_for_source
+
+    ptz_info = ptz_info_for_source(source)
     return {
         "slot": slot,
         "source": source,
@@ -1176,6 +1183,9 @@ def _grid_slot_payload(slot: int, *, probe_map: dict[int, dict] | None = None) -
         "job": job,
         "camera_available": camera_available,
         "camera_probe": probe_map.get(cam_idx) if cam_idx is not None else None,
+        "camera_id": ptz_info["camera_id"],
+        "ptz_supported": ptz_info["ptz_supported"],
+        "wifi_supported": ptz_info.get("wifi_supported", False),
     }
 
 
@@ -1466,6 +1476,13 @@ async def live_health() -> JSONResponse:
             "healthy": healthy,
         })
 
+    try:
+        from ..services import stream_governor
+
+        governor = stream_governor.snapshot()
+    except Exception:
+        governor = {}
+
     return JSONResponse({
         "live_24_7_enabled": settings.LIVE_24_7_ENABLED,
         "active_live_jobs": len(feeds),
@@ -1475,7 +1492,30 @@ async def live_health() -> JSONResponse:
         "stale_threshold_sec": stale_sec,
         "feeds": feeds,
         "sessions": sessions,
+        "stream_saver": {
+            "enabled": bool(getattr(settings, "STREAM_SAVER_ENABLED", True)),
+            "hybrid_sd_hd": bool(getattr(settings, "STREAM_HYBRID_ENABLED", True)),
+            "idle_power_save": bool(getattr(settings, "LIVE_IDLE_ENABLED", True)),
+            "sources": governor,
+        },
     })
+
+
+def _note_preview_viewer(job_id: str) -> None:
+    """Tell the stream governor a human is watching this feed — keeps a
+    power-saved cloud stream awake / wakes an idle one instantly."""
+    with _jobs_lock:
+        j = _jobs.get(job_id)
+        src = str(j.get("live_source") or "") if (j and j.get("is_live")) else ""
+    if not src:
+        return
+    try:
+        from ..services import stream_governor
+        from ..services.live_camera import normalize_live_source
+
+        stream_governor.note_viewer(normalize_live_source(src))
+    except Exception:
+        pass
 
 
 @router.get("/jobs/{job_id}/snapshot.jpg")
@@ -1483,6 +1523,7 @@ async def job_snapshot(job_id: str) -> Response:
     with _jobs_lock:
         if job_id not in _jobs:
             raise HTTPException(status_code=404, detail="Unknown job")
+    _note_preview_viewer(job_id)
     with _preview_lock:
         data = _preview_jpeg.get(job_id)
     if not data:
@@ -1507,11 +1548,15 @@ async def job_stream(job_id: str) -> StreamingResponse:
     async def _gen():
         last: bytes | None = None
         idle_ticks = 0
+        viewer_tick = 0
         while True:
             with _jobs_lock:
                 j = _jobs.get(job_id)
             if j is None or str(j.get("status") or "") not in ("queued", "running"):
                 break
+            viewer_tick += 1
+            if viewer_tick % 100 == 1:  # ~every 10s on the 0.1s cadence
+                _note_preview_viewer(job_id)
             with _preview_lock:
                 data = _preview_jpeg.get(job_id)
             if data is not None and data is not last:

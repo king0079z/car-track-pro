@@ -55,8 +55,7 @@ if [ -n "$DUCKDNS_TOKEN" ]; then
   echo "==> [3/7] Pointing DuckDNS '$SUB' at this VM"
   PUBIP="$(curl -fsSL https://api.ipify.org || true)"
   curl -fsSL "https://www.duckdns.org/update?domains=${SUB}&token=${DUCKDNS_TOKEN}&ip=${PUBIP}" && echo
-  ( crontab -l 2>/dev/null | grep -v duckdns.org; \
-    echo "*/5 * * * * curl -fsSL 'https://www.duckdns.org/update?domains=${SUB}&token=${DUCKDNS_TOKEN}&ip=' >/dev/null 2>&1" ) | crontab -
+  { crontab -l 2>/dev/null || true; } | grep -v duckdns.org | { cat; echo "*/5 * * * * curl -fsSL 'https://www.duckdns.org/update?domains=${SUB}&token=${DUCKDNS_TOKEN}&ip=' >/dev/null 2>&1"; } | crontab -
 else
   echo "==> [3/7] Skipping DuckDNS (no token). Ensure $DOMAIN already points at this VM."
 fi

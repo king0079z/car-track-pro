@@ -24,6 +24,10 @@ services:
       - .env.cloud
     environment:
       PORT: "8000"
+      # Keep every SQLite DB + its WAL sidecars inside ONE bind-mounted folder so
+      # WAL mode is safe (sidecars persist) and nothing is lost on redeploy.
+      CARTRACK_DATA_DIR: /app/data
+      DATABASE_URL: sqlite:////app/data/cartrack.db
     expose:
       - "8000"
     volumes:
@@ -32,11 +36,9 @@ services:
       # YOLO/OCR weights are NOT in git — delivered to ./data/models on the VM and
       # mounted read-only here (survives redeploys, no need to commit binaries).
       - ./data/models:/app/models:ro
-      # Persist the camera registry + databases across redeploys.
-      - ./data/cameras.json:/app/cameras.json
-      - ./data/cartrack.db:/app/cartrack.db
-      - ./data/live_sessions.db:/app/live_sessions.db
-      - ./data/analysis_history.db:/app/analysis_history.db
+      # Persist the camera registry + databases (and WAL sidecars) across redeploys.
+      # Mounting the DIRECTORY (not individual files) is what makes WAL durable.
+      - ./data:/app/data
     networks:
       - cartrack_net
     healthcheck:

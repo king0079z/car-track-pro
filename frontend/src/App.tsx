@@ -22,6 +22,7 @@ import { Services } from './pages/Services';
 import { Audit } from './pages/Audit';
 import { Settings } from './pages/settings/Settings';
 import { ClientErrorBoundary } from './components/ClientErrorBoundary';
+import { getHomeRoute } from './lib/permissions';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -29,35 +30,37 @@ const queryClient = new QueryClient({
   },
 });
 
-/** Exported for route-guard / auth tests (MemoryRouter harness). */
-export const AppRoutes: React.FC = () => {
-  const { isAuthenticated } = useAuth();
-
-  return (
-    <Routes>
-      <Route path="/login" element={isAuthenticated ? <Navigate to="/" replace /> : <Login />} />
-      <Route element={<ProtectedRoute><Layout /></ProtectedRoute>}>
-        <Route path="/" element={<Dashboard />} />
-        <Route path="/visits" element={<VisitsList />} />
-        <Route path="/visits/new" element={<NewVisit />} />
-        <Route path="/visits/:id" element={<VisitDetail />} />
-        <Route path="/vehicles" element={<Vehicles />} />
-        <Route path="/vehicles/:id" element={<VehicleProfile />} />
-        <Route path="/fleet-intelligence" element={<FleetIntelligence />} />
-        <Route path="/services" element={<Services />} />
-        <Route path="/analytics" element={<Analytics />} />
-        <Route path="/visionflow" element={<VisionFlowStudio />} />
-        <Route path="/visionflow/multicam" element={<VisionFlowMultiCam />} />
-        <Route path="/visionflow/history" element={<VisionFlowHistory />} />
-        <Route path="/cameras" element={<Navigate to="/visionflow/multicam" replace />} />
-        <Route path="/users" element={<ProtectedRoute adminOnly><Users /></ProtectedRoute>} />
-        <Route path="/audit" element={<ProtectedRoute adminOnly><Audit /></ProtectedRoute>} />
-        <Route path="/settings" element={<ProtectedRoute adminRoleOnly><Settings /></ProtectedRoute>} />
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Route>
-    </Routes>
-  );
+const LoginRedirect: React.FC = () => {
+  const { isAuthenticated, user } = useAuth();
+  if (!isAuthenticated) return <Login />;
+  return <Navigate to={getHomeRoute(user)} replace />;
 };
+
+/** Exported for route-guard / auth tests (MemoryRouter harness). */
+export const AppRoutes: React.FC = () => (
+  <Routes>
+    <Route path="/login" element={<LoginRedirect />} />
+    <Route element={<ProtectedRoute><Layout /></ProtectedRoute>}>
+      <Route path="/" element={<ProtectedRoute pageKey="dashboard"><Dashboard /></ProtectedRoute>} />
+      <Route path="/visits" element={<ProtectedRoute pageKey="visits"><VisitsList /></ProtectedRoute>} />
+      <Route path="/visits/new" element={<ProtectedRoute pageKey="visits"><NewVisit /></ProtectedRoute>} />
+      <Route path="/visits/:id" element={<ProtectedRoute pageKey="visits"><VisitDetail /></ProtectedRoute>} />
+      <Route path="/vehicles" element={<ProtectedRoute pageKey="vehicles"><Vehicles /></ProtectedRoute>} />
+      <Route path="/vehicles/:id" element={<ProtectedRoute pageKey="vehicles"><VehicleProfile /></ProtectedRoute>} />
+      <Route path="/fleet-intelligence" element={<ProtectedRoute pageKey="fleet"><FleetIntelligence /></ProtectedRoute>} />
+      <Route path="/services" element={<ProtectedRoute pageKey="services"><Services /></ProtectedRoute>} />
+      <Route path="/analytics" element={<ProtectedRoute pageKey="analytics"><Analytics /></ProtectedRoute>} />
+      <Route path="/visionflow" element={<ProtectedRoute pageKey="visionflow"><VisionFlowStudio /></ProtectedRoute>} />
+      <Route path="/visionflow/multicam" element={<ProtectedRoute pageKey="visionflow_multicam"><VisionFlowMultiCam /></ProtectedRoute>} />
+      <Route path="/visionflow/history" element={<ProtectedRoute pageKey="visionflow"><VisionFlowHistory /></ProtectedRoute>} />
+      <Route path="/cameras" element={<Navigate to="/visionflow/multicam" replace />} />
+      <Route path="/users" element={<ProtectedRoute adminOnly pageKey="users"><Users /></ProtectedRoute>} />
+      <Route path="/audit" element={<ProtectedRoute adminOnly pageKey="audit"><Audit /></ProtectedRoute>} />
+      <Route path="/settings" element={<ProtectedRoute adminRoleOnly pageKey="settings"><Settings /></ProtectedRoute>} />
+      <Route path="*" element={<Navigate to="/" replace />} />
+    </Route>
+  </Routes>
+);
 
 export default function App() {
   return (

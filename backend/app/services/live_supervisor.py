@@ -259,6 +259,10 @@ class LiveSupervisor:
                 continue
 
             health = job.get("live_health") or {}
+            if health.get("idle"):
+                # Power save: the stream governor parked this feed on purpose
+                # (no vehicles, no viewers). It wakes itself — don't restart.
+                continue
             last_at = health.get("last_frame_at")
             if not last_at:
                 continue

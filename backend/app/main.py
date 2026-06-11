@@ -118,6 +118,10 @@ manager = ConnectionManager()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("CarTrack Pro starting up…")
+    from concurrent.futures import ThreadPoolExecutor
+
+    loop = asyncio.get_running_loop()
+    loop.set_default_executor(ThreadPoolExecutor(max_workers=16))
     init_db()
     _seed_default_data()
     os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
@@ -177,6 +181,12 @@ async def lifespan(app: FastAPI):
         await audit_task
     except asyncio.CancelledError:
         pass
+    try:
+        from .database import checkpoint_wal
+
+        checkpoint_wal()
+    except Exception:
+        logger.exception("WAL checkpoint on shutdown failed")
     logger.info("CarTrack Pro shutting down…")
 
 

@@ -17,15 +17,32 @@
 param(
   [string] $VpsIp = "46.225.26.2",
   [string] $Domain = "cartrackpro.duckdns.org",
-  [Parameter(Mandatory = $true)]
-  [string] $DuckDnsToken,
+  [string] $DuckDnsToken = "",
   [string] $CameraPassword = "",
   [string] $SshUser = "root",
+  [string] $SshKeyPath = (Join-Path $env:USERPROFILE ".ssh\cartrack_vps"),
   [string] $RepoUrl = "https://github.com/king0079z/car-track-pro.git"
 )
 
 $ErrorActionPreference = "Stop"
 function Step($m) { Write-Host "==> $m" -ForegroundColor Cyan }
+
+function Import-DeployLocalEnv {
+  $f = Join-Path $PSScriptRoot ".env.deploy.local"
+  if (-not (Test-Path $f)) { return }
+  Get-Content $f | ForEach-Object {
+    $line = $_.Trim()
+    if (-not $line -or $line.StartsWith("#")) { return }
+    $i = $line.IndexOf("=")
+    if ($i -lt 1) { return }
+    $k = $line.Substring(0, $i).Trim()
+    $v = $line.Substring($i + 1).Trim()
+    if ($k -and $v) { Set-Item -Path "env:$k" -Value $v }
+  }
+}
+Import-DeployLocalEnv
+if (-not $CameraPassword) { $CameraPassword = $env:CARTRACK_CAMERA_PASSWORD }
+if (-not $DuckDnsToken) { $DuckDnsToken = $env:CARTRACK_DUCKDNS_TOKEN }
 
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $Weights = Join-Path $Root "backend\models\best.pt"
@@ -50,27 +67,30 @@ if (-not $CameraPassword) {
   finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr) }
 }
 if (-not $CameraPassword) { throw "Camera password cannot be empty." }
+if (-not $DuckDnsToken) { throw "DuckDNS token missing. Set CARTRACK_DUCKDNS_TOKEN in scripts/.env.deploy.local" }
 
 $Target = "${SshUser}@${VpsIp}"
+$SshBase = @("-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=15", "-o", "BatchMode=yes")
+if ((Test-Path $SshKeyPath)) { $SshBase += @("-i", $SshKeyPath) }
+
 Step "Testing SSH to $Target ..."
-ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 $Target "echo SSH OK"
-if ($LASTEXITCODE -ne 0) { throw "Cannot SSH to $Target. Check IP, firewall (port 22), and credentials." }
+& ssh @SshBase $Target "echo SSH OK"
+if ($LASTEXITCODE -ne 0) {
+  throw "Cannot SSH to $Target. Open Hetzner web console (>_) and paste deploy/cloud/ADD-SSH-KEY-CONSOLE.txt, then re-run this script."
+}
 
 Step "Uploading best.pt (~6 MB) ..."
-scp -o StrictHostKeyChecking=accept-new $Weights "${Target}:/root/best.pt"
+& scp @SshBase $Weights "${Target}:/root/best.pt"
 
 Step "Uploading bootstrap script + env template ..."
-scp -o StrictHostKeyChecking=accept-new $Bootstrap "${Target}:/root/bootstrap-vps.sh"
-scp -o StrictHostKeyChecking=accept-new $EnvTemplate "${Target}:/root/env.cartrackpro.template"
+& scp @SshBase $Bootstrap "${Target}:/root/bootstrap-vps.sh"
+& scp @SshBase $EnvTemplate "${Target}:/root/env.cartrackpro.template"
+& ssh @SshBase $Target "sed -i 's/\r$//' /root/bootstrap-vps.sh /root/env.cartrackpro.template 2>/dev/null; chmod +x /root/bootstrap-vps.sh"
 
 Step "Running bootstrap on VPS (Docker build ~10-15 min) ..."
 $escapedPwd = $CameraPassword -replace "'", "'\\''"
-$remoteCmd = @"
-chmod +x /root/bootstrap-vps.sh
-export CARTRACK_REPO_URL='$RepoUrl'
-sudo bash /root/bootstrap-vps.sh '$Domain' '$DuckDnsToken' '$escapedPwd'
-"@
-ssh -o StrictHostKeyChecking=accept-new $Target $remoteCmd
+$remoteCmd = "export CARTRACK_REPO_URL='$RepoUrl'; bash /root/bootstrap-vps.sh '$Domain' '$DuckDnsToken' '$escapedPwd'"
+& ssh @SshBase $Target $remoteCmd
 if ($LASTEXITCODE -ne 0) { throw "Bootstrap failed on VPS. SSH in and check: docker compose -f /opt/cartrack/deploy/cloud/docker-compose.oracle.yml logs backend" }
 
 Write-Host ""

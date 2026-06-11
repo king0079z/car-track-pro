@@ -1249,7 +1249,7 @@ export const Analytics: React.FC = () => {
             <div className="card-title">Revenue by service</div>
             <div className="card-subtitle">Line counts, averages, and revenue share — ties to the distribution chart above</div>
           </div>
-          <div style={{ overflowX: 'auto' }}>
+          <div className="table-scroll">
             <table className="data-table">
               <thead>
                 <tr style={{ position: 'sticky', top: 0, background: 'var(--bg-elevated)', zIndex: 1 }}>
@@ -1501,7 +1501,7 @@ export const Analytics: React.FC = () => {
               </div>
             ) : (
               <div>
-                <div style={{ overflowX: 'auto' }}>
+                <div className="table-scroll">
                   <table className="data-table">
                     <thead>
                       <tr>
@@ -1570,7 +1570,7 @@ export const Analytics: React.FC = () => {
               <div style={{ padding: '18px 24px', borderBottom: '1px solid var(--border-light)' }}>
                 <div className="card-title">Revenue by Service</div>
               </div>
-              <div style={{ overflowX: 'auto' }}>
+              <div className="table-scroll">
                 <table className="data-table">
                   <thead>
                     <tr><th>#</th><th>Service</th><th>Count</th><th>Revenue</th><th>Avg</th><th>Share</th></tr>
@@ -1637,7 +1637,7 @@ export const Analytics: React.FC = () => {
                       </div>
                       {i === 0 && <Award size={14} color="var(--text-warning)" />}
                     </div>
-                    <div style={{ display: 'flex', gap: 16, paddingTop: 6, borderTop: '1px solid var(--border-light)', width: '100%' }}>
+                    <div className="staff-metric-row" style={{ paddingTop: 6, borderTop: '1px solid var(--border-light)', width: '100%' }}>
                       <div>
                         <div style={{ fontSize: 18, fontWeight: 800, color: COLORS[i % COLORS.length] }}>{s.services_count}</div>
                         <div style={{ fontSize: 9, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: 0.5 }}>Services</div>
@@ -1684,7 +1684,7 @@ export const Analytics: React.FC = () => {
                 <div style={{ padding: '18px 24px', borderBottom: '1px solid var(--border-light)' }}>
                   <div className="card-title">Full Staff KPI Table</div>
                 </div>
-                <div style={{ overflowX: 'auto' }}>
+                <div className="table-scroll">
                   <table className="data-table">
                     <thead>
                       <tr>
@@ -1801,7 +1801,7 @@ export const Analytics: React.FC = () => {
             <div style={{ padding: '18px 24px', borderBottom: '1px solid var(--border-light)' }}>
               <div className="card-title">Monthly Breakdown</div>
             </div>
-            <div style={{ overflowX: 'auto' }}>
+            <div className="table-scroll">
               <table className="data-table">
                 <thead>
                   <tr><th>Month</th><th>Cars</th><th>Revenue</th><th>Avg Duration</th><th>Trend</th></tr>

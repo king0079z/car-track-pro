@@ -239,7 +239,7 @@ const AnprWidget: React.FC = () => {
 
       {/* Stats strip */}
       {stats && (
-        <div style={{ display: 'flex', borderBottom: '1px solid var(--border-light)' }}>
+        <div className="anpr-stats-row" style={{ borderBottom: '1px solid var(--border-light)' }}>
           {[
             { label: 'Today', value: stats.today_detections ?? 0, color: '#06b6d4' },
             { label: 'Plates', value: stats.today_unique_plates ?? 0, color: '#3b82f6' },
@@ -247,7 +247,7 @@ const AnprWidget: React.FC = () => {
             { label: 'Speed', value: stats.avg_speed_kmh ? `${stats.avg_speed_kmh}` : '—', color: '#d97706' },
             { label: 'Linked', value: stats.linked_to_vehicle ?? 0, color: '#059669' },
           ].map(s => (
-            <div key={s.label} style={{ flex: 1, padding: '8px 0', textAlign: 'center', borderRight: '1px solid var(--border-light)' }}>
+            <div key={s.label} style={{ padding: '8px 0', textAlign: 'center', borderRight: '1px solid var(--border-light)' }}>
               <div style={{ fontSize: 15, fontWeight: 800, color: s.color, fontVariantNumeric: 'tabular-nums' }}>{s.value}</div>
               <div style={{ fontSize: 9, color: 'var(--text-muted)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em', marginTop: 1 }}>{s.label}</div>
             </div>
@@ -257,7 +257,7 @@ const AnprWidget: React.FC = () => {
 
       {/* Recent rows */}
       {recent.length > 0 && (
-        <div style={{ overflowX: 'auto' }}>
+        <div className="table-scroll">
           <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 720 }}>
             <thead>
               <tr>
@@ -473,8 +473,8 @@ export const Dashboard: React.FC = () => {
 
       {/* Late Alert Banner */}
       {lateVisits.length > 0 && (
-        <div style={{
-          display: 'flex', alignItems: 'center', gap: 10, padding: '8px 14px',
+        <div className="late-visits-bar" style={{
+          padding: '8px 14px',
           background: 'rgba(239,68,68,0.06)', border: '1px solid rgba(239,68,68,0.22)',
           borderRadius: 10, marginBottom: 12, fontSize: 12,
         }}>
@@ -623,7 +623,7 @@ export const Dashboard: React.FC = () => {
             </Link>
           </div>
         ) : (
-          <div style={{ overflowX: 'auto' }}>
+          <div className="table-scroll">
             <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 880 }}>
               <thead>
                 <tr>

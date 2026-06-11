@@ -4,8 +4,10 @@ import { useQueryClient } from '@tanstack/react-query';
 import {
   Webcam, Power, PowerOff, Loader2, Activity, Car,
   RefreshCw, Grid2X2, AlertCircle, Link2, History, Gauge,
-  Eye, Monitor, Wifi, Clock, Search, CheckCircle2,
+  Eye, Monitor, Wifi, Clock, Search, CheckCircle2, Cloud,
+  ChevronUp, ChevronDown, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, Move,
 } from 'lucide-react';
+import toast from 'react-hot-toast';
 import { anprApi, camerasApi, visionflowApi, visionflowSyncApi } from '../../services/api';
 import {
   PlateActionCard,
@@ -19,6 +21,7 @@ import {
   PlateTrackStatusBadge,
   type VisionFlowVehicleRow,
 } from './VisionFlowPlateQuality';
+import { CameraWifiDialog } from '../../components/CameraWifiDialog';
 
 type VehicleRow = VisionFlowVehicleRow;
 
@@ -27,6 +30,8 @@ interface LiveHealth {
   processed_frames?: number;
   message?: string;
   last_frame_at?: string | null;
+  idle?: boolean;
+  stream_tier?: 'sd' | 'hd' | null;
 }
 
 interface JobState {
@@ -49,6 +54,9 @@ interface GridSlot {
   camera_available: boolean | null;
   camera_probe?: { index: number; width: number; height: number; fps: number } | null;
   job: JobState | null;
+  camera_id?: string | null;
+  ptz_supported?: boolean;
+  wifi_supported?: boolean;
 }
 
 interface GridResponse {
@@ -70,7 +78,7 @@ function panelTitle(slot: number, source: string): string {
   const s = source.trim().toLowerCase();
   const isDahua =
     s === 'dahua-hero-a1' || s === 'dahua' || s === 'hero-a1' || s.includes('/cam/realmonitor');
-  if (slot === 0 && isDahua) return 'Panel 1 — DH-H3A (Wi-Fi)';
+  if (slot === 0 && isDahua) return 'Panel 1 — DH-H3A (Cloud / Easy4IP)';
   if (slot === 0 && (!s || s === '0' || s === 'webcam')) return 'Panel 1 — PC / laptop camera';
   return `Panel ${slot + 1} — USB camera #${slot}`;
 }
@@ -78,7 +86,7 @@ function panelTitle(slot: number, source: string): string {
 function panelSubtitle(slot: number, source: string): string {
   const s = source.trim();
   if (s === 'dahua-hero-a1' || s === 'dahua' || s === 'hero-a1') {
-    return 'Source: DH-H3A (saved Wi-Fi RTSP from Settings)';
+    return 'Source: DH-H3A via Cloud (Easy4IP P2P relay) — configured in Settings';
   }
   if (!s || s === '0' || s.toLowerCase() === 'webcam') {
     return slot === 0
@@ -92,7 +100,7 @@ function panelSubtitle(slot: number, source: string): string {
 }
 
 const QUICK_SOURCES = [
-  { value: 'dahua-hero-a1', label: 'DH-H3A (Dahua Wi-Fi)', icon: Wifi, hint: 'Saved camera from Settings — use this for the Hero A1' },
+  { value: 'dahua-hero-a1', label: 'DH-H3A (Cloud / Easy4IP)', icon: Cloud, hint: 'Saved Hero A1 — connects via Dahua cloud (Easy4IP P2P), no LAN needed' },
   { value: '0', label: 'PC cam (0)', icon: Monitor, hint: 'Laptop / built-in webcam on the server PC' },
   { value: '1', label: 'USB #1', icon: Webcam, hint: 'Second USB camera' },
   { value: '2', label: 'USB #2', icon: Webcam, hint: 'Third USB camera' },
@@ -118,7 +126,7 @@ const VehicleRegistry: React.FC<{
           </span>
         )}
       </div>
-      <div style={{ overflowY: 'auto', maxHeight: compact ? 140 : 220 }}>
+      <div className="table-scroll" style={{ overflowY: 'auto', maxHeight: compact ? 140 : 220 }}>
         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
           <thead>
             <tr style={{ background: 'var(--bg-surface)' }}>
@@ -176,6 +184,58 @@ const VehicleRegistry: React.FC<{
   );
 };
 
+/** Cloud/LAN pan-tilt-zoom pad overlaid on a live PTZ-capable camera. */
+const PtzControl: React.FC<{ cameraId: string }> = ({ cameraId }) => {
+  const [busyDir, setBusyDir] = useState<string | null>(null);
+
+  const nudge = useCallback(async (direction: string) => {
+    setBusyDir(direction);
+    try {
+      const { data } = await camerasApi.ptz(cameraId, direction, 1);
+      if (!data.ok) toast.error(data.error || 'PTZ command failed', { duration: 5000 });
+    } catch {
+      toast.error('PTZ command failed');
+    } finally {
+      setBusyDir(null);
+    }
+  }, [cameraId]);
+
+  const btn = (direction: string, icon: React.ReactNode, title: string): React.ReactNode => (
+    <button
+      type="button"
+      title={title}
+      disabled={busyDir !== null}
+      onClick={() => void nudge(direction)}
+      style={{
+        width: 30, height: 30, borderRadius: 8, display: 'grid', placeItems: 'center',
+        border: '1px solid rgba(255,255,255,0.18)', background: 'rgba(8,12,20,0.66)',
+        color: busyDir === direction ? '#3b82f6' : '#e5e7eb',
+        cursor: busyDir !== null ? 'wait' : 'pointer', backdropFilter: 'blur(3px)',
+      }}
+    >
+      {busyDir === direction ? <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> : icon}
+    </button>
+  );
+
+  return (
+    <div style={{ position: 'absolute', top: 8, right: 8, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '2px 7px', borderRadius: 99, background: 'rgba(8,12,20,0.66)', color: '#cbd5e1', fontSize: 9, fontWeight: 700, backdropFilter: 'blur(3px)' }}>
+        <Move size={10} /> PTZ
+      </div>
+      {btn('up', <ChevronUp size={16} />, 'Tilt up')}
+      <div style={{ display: 'flex', gap: 4 }}>
+        {btn('left', <ChevronLeft size={16} />, 'Pan left')}
+        {btn('right', <ChevronRight size={16} />, 'Pan right')}
+      </div>
+      {btn('down', <ChevronDown size={16} />, 'Tilt down')}
+      <div style={{ display: 'flex', gap: 4, marginTop: 2 }}>
+        {btn('zoom_in', <ZoomIn size={15} />, 'Zoom in')}
+        {btn('zoom_out', <ZoomOut size={15} />, 'Zoom out')}
+      </div>
+    </div>
+  );
+};
+
 const CameraTile: React.FC<{
   slot: GridSlot;
   sourceDraft: string;
@@ -186,9 +246,11 @@ const CameraTile: React.FC<{
   plateActions?: Record<string, PlateAction>;
 }> = ({ slot, sourceDraft, onSourceChange, onToggle, busy, isPcCameraPanel, plateActions }) => {
   const [preview, setPreview] = useState<string | null>(null);
+  const [wifiOpen, setWifiOpen] = useState(false);
   const [showIpHint, setShowIpHint] = useState(false);
   const prevUrl = useRef<string | null>(null);
   const activeRef = useRef(true);
+  const standbyRef = useRef(false);
   const ipInputRef = useRef<HTMLInputElement>(null);
 
   const job = slot.job;
@@ -200,7 +262,9 @@ const CameraTile: React.FC<{
   const loading = active && !preview && job?.status !== 'error';
   const vehicles = job?.vehicles ?? [];
   const health = job?.live_health;
-  const streamOk = Boolean(running && health?.stream_connected && health?.last_frame_at);
+  const standby = Boolean(running && health?.idle);
+  standbyRef.current = standby;
+  const streamOk = Boolean(running && health?.stream_connected && health?.last_frame_at && !standby);
   const plateCount = vehicles.filter(v => v.plate && v.plate !== '—').length;
   const isIpSource = /^rtsp|^http/i.test(sourceDraft.trim());
 
@@ -224,7 +288,9 @@ const CameraTile: React.FC<{
         const r = await fetch(`${visionflowApi.snapshotUrl(slot.job_id!)}?t=${Date.now()}`, { cache: 'no-store' });
         if (r.ok && r.status !== 204) {
           misses = 0;
-          delay = 120;
+          // Standby (power save): the frame barely changes — poll gently. The
+          // fetch itself signals "someone is watching" and wakes the stream.
+          delay = standbyRef.current ? 1500 : 120;
           const url = URL.createObjectURL(await r.blob());
           setPreview(url);
           if (prevUrl.current) URL.revokeObjectURL(prevUrl.current);
@@ -259,7 +325,7 @@ const CameraTile: React.FC<{
     }}>
       {/* Header */}
       <div style={{ padding: '10px 14px', borderBottom: '1px solid var(--border-light)', background: isPcCameraPanel ? 'rgba(16,185,129,0.06)' : 'var(--bg-elevated)' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <div className="camera-tile-header">
           <div style={{
             width: 32, height: 32, borderRadius: 8, flexShrink: 0,
             background: running ? 'rgba(16,185,129,0.15)' : isPcCameraPanel ? 'rgba(16,185,129,0.12)' : 'rgba(100,116,139,0.12)',
@@ -269,33 +335,58 @@ const CameraTile: React.FC<{
             {isPcCameraPanel ? <Monitor size={15} color="#10b981" /> : <Webcam size={15} color={running ? '#10b981' : '#64748b'} />}
           </div>
           <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: 13, fontWeight: 700, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-              {panelTitle(slot.slot, sourceDraft)}
+            <div style={{ fontSize: 13, fontWeight: 700, display: 'flex', alignItems: 'center', gap: 6, minWidth: 0, flexWrap: 'wrap' }}>
+              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={panelTitle(slot.slot, sourceDraft)}>
+                {panelTitle(slot.slot, sourceDraft)}
+              </span>
               {isPcCameraPanel && (
-                <span style={{ fontSize: 9, fontWeight: 700, padding: '2px 7px', borderRadius: 99, background: 'rgba(16,185,129,0.15)', color: '#10b981', border: '1px solid rgba(16,185,129,0.25)' }}>
+                <span style={{ flexShrink: 0, fontSize: 9, fontWeight: 700, padding: '2px 7px', borderRadius: 99, background: 'rgba(16,185,129,0.15)', color: '#10b981', border: '1px solid rgba(16,185,129,0.25)' }}>
                   INDEX 0
                 </span>
               )}
               {slot.camera_available === true && (
-                <span style={{ fontSize: 9, fontWeight: 700, padding: '2px 7px', borderRadius: 99, background: 'rgba(59,130,246,0.1)', color: '#3b82f6' }}>DETECTED</span>
+                <span style={{ flexShrink: 0, fontSize: 9, fontWeight: 700, padding: '2px 7px', borderRadius: 99, background: 'rgba(59,130,246,0.1)', color: '#3b82f6' }}>DETECTED</span>
               )}
             </div>
-            <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginTop: 2 }}>{panelSubtitle(slot.slot, sourceDraft)}</div>
+            <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{panelSubtitle(slot.slot, sourceDraft)}</div>
           </div>
-          {streamOk && (
-            <span style={{ fontSize: 10, fontWeight: 700, color: '#10b981', display: 'flex', alignItems: 'center', gap: 4 }}>
-              <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#10b981', animation: 'vfPulse 1s ease-in-out infinite' }} /> LIVE
-            </span>
-          )}
-          <button type="button" disabled={busy} onClick={() => onToggle(!locked)} style={{
-            display: 'inline-flex', alignItems: 'center', gap: 6, padding: '6px 12px', borderRadius: 8, border: 'none',
-            cursor: busy ? 'wait' : 'pointer', fontSize: 11, fontWeight: 700,
-            background: locked ? 'rgba(239,68,68,0.12)' : 'rgba(16,185,129,0.15)',
-            color: locked ? '#ef4444' : '#10b981', opacity: busy ? 0.6 : 1,
-          }}>
-            {busy ? <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} /> : locked ? <PowerOff size={12} /> : <Power size={12} />}
-            {locked ? 'Stop' : 'Start'}
-          </button>
+          <div className="camera-tile-actions">
+            {streamOk && (
+              <span style={{ fontSize: 10, fontWeight: 700, color: '#10b981', display: 'flex', alignItems: 'center', gap: 4 }}>
+                <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#10b981', animation: 'vfPulse 1s ease-in-out infinite' }} /> LIVE
+                {health?.stream_tier && (
+                  <span style={{ fontSize: 9, fontWeight: 800, padding: '1px 5px', borderRadius: 5, background: health.stream_tier === 'hd' ? 'rgba(59,130,246,0.15)' : 'rgba(100,116,139,0.15)', color: health.stream_tier === 'hd' ? '#3b82f6' : '#94a3b8' }}>
+                    {health.stream_tier.toUpperCase()}
+                  </span>
+                )}
+              </span>
+            )}
+            {standby && (
+              <span
+                title="Power save — no vehicles detected. The camera wakes instantly on motion or when you watch this feed."
+                style={{ fontSize: 10, fontWeight: 700, color: '#f59e0b', display: 'flex', alignItems: 'center', gap: 4 }}
+              >
+                <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#f59e0b', animation: 'vfPulse 2.4s ease-in-out infinite' }} /> STANDBY
+              </span>
+            )}
+            {slot.wifi_supported && slot.camera_id && (
+              <button type="button" onClick={() => setWifiOpen(true)} title="Change camera Wi-Fi" style={{
+                display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 30, height: 30, borderRadius: 8, flexShrink: 0,
+                border: '1px solid var(--border-light)', background: 'var(--bg-surface)', color: 'var(--text-secondary)', cursor: 'pointer',
+              }}>
+                <Wifi size={13} />
+              </button>
+            )}
+            <button type="button" disabled={busy} onClick={() => onToggle(!locked)} style={{
+              display: 'inline-flex', alignItems: 'center', gap: 6, padding: '6px 12px', borderRadius: 8, border: 'none', flexShrink: 0,
+              cursor: busy ? 'wait' : 'pointer', fontSize: 11, fontWeight: 700,
+              background: locked ? 'rgba(239,68,68,0.12)' : 'rgba(16,185,129,0.15)',
+              color: locked ? '#ef4444' : '#10b981', opacity: busy ? 0.6 : 1,
+            }}>
+              {busy ? <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} /> : locked ? <PowerOff size={12} /> : <Power size={12} />}
+              {locked ? 'Stop' : 'Start'}
+            </button>
+          </div>
         </div>
       </div>
 
@@ -391,6 +482,22 @@ const CameraTile: React.FC<{
             )}
           </div>
         )}
+        {standby && preview && (
+          <div style={{
+            position: 'absolute', inset: 0, display: 'grid', placeItems: 'center',
+            background: 'rgba(3,4,7,0.55)', backdropFilter: 'blur(1px)', textAlign: 'center', padding: 16,
+          }}>
+            <div>
+              <div style={{ fontSize: 12, fontWeight: 700, color: '#f59e0b', marginBottom: 4 }}>Power save</div>
+              <div style={{ fontSize: 10.5, color: 'var(--text-muted)' }}>
+                No vehicles in view — wakes instantly on motion or while you watch
+              </div>
+            </div>
+          </div>
+        )}
+        {running && slot.ptz_supported && slot.camera_id && (
+          <PtzControl cameraId={slot.camera_id} />
+        )}
         {running && (
           <div style={{ position: 'absolute', bottom: 8, left: 8, display: 'flex', gap: 6 }}>
             <span style={{ padding: '3px 8px', borderRadius: 6, fontSize: 10, fontWeight: 700, background: 'rgba(0,0,0,0.65)', color: 'var(--text-accent)' }}>
@@ -410,6 +517,15 @@ const CameraTile: React.FC<{
         <div style={{ padding: '8px 14px', fontSize: 11, color: '#ef4444', display: 'flex', gap: 6, borderTop: '1px solid var(--border-light)' }}>
           <AlertCircle size={12} style={{ flexShrink: 0 }} />{job.message}
         </div>
+      )}
+
+      {wifiOpen && slot.camera_id && (
+        <CameraWifiDialog
+          cameraId={slot.camera_id}
+          cameraName={panelTitle(slot.slot, sourceDraft)}
+          isOpen={wifiOpen}
+          onClose={() => setWifiOpen(false)}
+        />
       )}
     </div>
   );
@@ -460,7 +576,9 @@ export const VisionFlowMultiCam: React.FC = () => {
 
   useEffect(() => {
     refreshGrid();
-    const id = setInterval(refreshGrid, 1200);
+    // 3s keeps the wall feeling live while cutting backend load ~2.5x vs the
+    // old 1.2s cadence (per-tile snapshots carry the actual video motion).
+    const id = setInterval(refreshGrid, 3000);
     return () => clearInterval(id);
   }, [refreshGrid]);
 
@@ -701,7 +819,7 @@ export const VisionFlowMultiCam: React.FC = () => {
           gridTemplateColumns:
             slots.length <= 2
               ? 'repeat(auto-fit, minmax(0, 1fr))'
-              : 'repeat(auto-fit, minmax(340px, 1fr))',
+              : 'repeat(auto-fit, minmax(min(100%, 340px), 1fr))',
           gap: 16,
           marginBottom: 24,
         }}
@@ -736,7 +854,7 @@ export const VisionFlowMultiCam: React.FC = () => {
             Same data as ANPR &amp; Speed — plates sync to CarTrack when tracks exit. Open visits or register new vehicles below.
           </div>
         </div>
-        <div style={{ overflowX: 'auto' }}>
+        <div className="table-scroll">
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
             <thead>
               <tr style={{ background: 'var(--bg-surface)' }}>

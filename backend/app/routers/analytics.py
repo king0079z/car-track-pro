@@ -11,7 +11,7 @@ from ..models.user import User
 from ..models.vehicle import Vehicle
 from ..models.visit import Visit, VisitStatus
 from ..schemas.analytics import DashboardStats
-from ..utils.auth import get_current_user
+from ..utils.auth import get_current_user, require_page
 from ..utils.helpers import calculate_duration
 from ..services.service_duration import infer_service_item_minutes, visit_service_counts as get_visit_service_counts
 from ..utils.qatar_time import (
@@ -28,7 +28,7 @@ router = APIRouter(prefix="/api/analytics", tags=["Analytics"])
 
 
 @router.get("/dashboard", response_model=DashboardStats)
-def get_dashboard_stats(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def get_dashboard_stats(db: Session = Depends(get_db), current_user: User = Depends(require_page("dashboard"))):
     today = qatar_today()
     today_start, today_end = qatar_day_start_end(today)
 
@@ -126,7 +126,7 @@ def get_analytics_report(
     start_date: date = Query(default=None),
     end_date: date = Query(default=None),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_page("analytics"))
 ):
     if not start_date:
         start_date = qatar_today() - timedelta(days=30)
@@ -212,7 +212,7 @@ def get_analytics_report(
 def get_hourly_stats(
     target_date: date = Query(default=None),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_page("analytics"))
 ):
     if not target_date:
         target_date = qatar_today()
@@ -244,7 +244,7 @@ def get_hourly_stats(
 def get_summary(
     days: int = Query(default=7, ge=1, le=365),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_page("analytics"))
 ):
     """Summary KPIs for the last N days."""
     start_dt, end_dt = qatar_rolling_range_days(days)
@@ -282,7 +282,7 @@ def get_summary(
 def get_daily(
     days: int = Query(default=7, ge=1, le=365),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_page("analytics"))
 ):
     """Per-day breakdown for the last N days."""
     start_dt, end_dt = qatar_rolling_range_days(days)
@@ -322,7 +322,7 @@ def get_daily(
 def get_by_service(
     days: int = Query(default=7, ge=1, le=365),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_page("analytics"))
 ):
     """Revenue and count breakdown by service type for the last N days."""
     start_dt, end_dt = qatar_rolling_range_days(days)
@@ -350,7 +350,7 @@ def get_by_service(
 def get_service_duration(
     days: int = Query(default=30, ge=1, le=365),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_page("analytics"))
 ):
     """Average actual duration per service type (only completed items with timing data)."""
     start_dt, end_dt = qatar_rolling_range_days(days)
@@ -418,7 +418,7 @@ def get_service_duration_by_vehicle_type(
     days: int = Query(default=90, ge=1, le=365),
     vehicle_types: str = Query(default="sedan,suv", description="Comma-separated body types, e.g. sedan,suv"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_page("analytics")),
 ):
     """
     Average minutes per service, split by vehicle body type (e.g. SUV vs Sedan).
@@ -529,7 +529,7 @@ def get_service_duration_jobs(
     days: int = Query(default=90, ge=1, le=365),
     vehicle_types: str = Query(default="sedan,suv"),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_page("analytics")),
 ):
     """Individual service line items with full vehicle details (expand row in Fleet Intelligence)."""
     start_dt, end_dt = qatar_rolling_range_days(days)
@@ -605,7 +605,7 @@ def get_service_duration_jobs(
 def get_by_vehicle_type(
     days: int = Query(default=30, ge=1, le=365),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_page("analytics"))
 ):
     """Average visit duration and revenue by vehicle type."""
     start_dt, end_dt = qatar_rolling_range_days(days)
@@ -644,7 +644,7 @@ def get_by_vehicle_type(
 def get_staff_kpi(
     days: int = Query(default=30, ge=1, le=365),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_page("analytics"))
 ):
     """Staff performance KPIs: services completed, revenue, avg duration."""
     start_dt, end_dt = qatar_rolling_range_days(days)
@@ -699,7 +699,7 @@ def get_staff_kpi(
 def get_seasonal(
     year: int = Query(default=None),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_page("analytics"))
 ):
     """Monthly revenue and car count for the year (seasonal analysis)."""
     if not year:
@@ -738,7 +738,7 @@ def get_seasonal(
 def get_by_vehicle_model(
     days: int = Query(default=90, ge=1, le=730),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_page("analytics")),
 ):
     """Per-model breakdown: avg duration, revenue, service counts."""
     from sqlalchemy import func as sqlfunc

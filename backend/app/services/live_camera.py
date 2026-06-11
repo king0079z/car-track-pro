@@ -218,6 +218,7 @@ def open_capture_for_live(source: str, *, strict_index: bool = True) -> cv2.Vide
     """Open a USB camera index or network stream (RTSP / HTTP)."""
     from .dahua_camera import (
         dahua_hero_a1_config,
+        invalidate_dahua_cloud_cache,
         is_dahua_alias,
         open_dahua_stream,
         resolve_dahua_source,
@@ -225,8 +226,9 @@ def open_capture_for_live(source: str, *, strict_index: bool = True) -> cv2.Vide
 
     raw = (source or "").strip()
     s = normalize_live_source(source)
-    if is_dahua_alias(raw) or is_dahua_alias(s):
-        resolved = resolve_dahua_source(raw if is_dahua_alias(raw) else s)
+    dahua_token = raw if is_dahua_alias(raw) else (s if is_dahua_alias(s) else None)
+    if dahua_token is not None:
+        resolved = resolve_dahua_source(dahua_token)
         if not resolved:
             raise RuntimeError(
                 "Dahua camera is not reachable yet. Open Settings → Dahua camera, "
@@ -235,12 +237,21 @@ def open_capture_for_live(source: str, *, strict_index: bool = True) -> cv2.Vide
         s = resolved
     if s.isdigit():
         return open_usb_camera(int(s), strict_index=strict_index)
-    if s.lower().startswith("rtsp://") or s.lower().startswith("rtsps://"):
+    low = s.lower()
+    if low.startswith("rtsp://") or low.startswith("rtsps://"):
         cfg = dahua_hero_a1_config()
         use_tcp = bool(cfg.get("use_tcp_transport", True))
         if is_dahua_alias(raw) or "/cam/realmonitor" in s:
             return open_dahua_stream(s, use_tcp=use_tcp)
         return open_dahua_stream(s, use_tcp=True)
+    if low.startswith("http://") or low.startswith("https://"):
+        # Cloud HLS (.m3u8) — open with the reconnect-tolerant FFmpeg options.
+        cap = open_dahua_stream(s, use_tcp=True)
+        if not cap.isOpened() and dahua_token is not None:
+            # Cached URL may have expired server-side — drop it so the next
+            # reconnect attempt fetches a fresh one from the API.
+            invalidate_dahua_cloud_cache(dahua_token)
+        return cap
     cap = cv2.VideoCapture(s)
     try:
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)

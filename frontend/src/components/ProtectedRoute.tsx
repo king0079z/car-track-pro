@@ -1,6 +1,7 @@
 import React from 'react';
-import { Navigate } from 'react-router-dom';
+import { Navigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
+import { canAccessPage, canAccessRoute, getHomeRoute, type PageKey } from '../lib/permissions';
 
 export const PageLoader: React.FC = () => (
   <div style={{
@@ -25,17 +26,27 @@ export const PageLoader: React.FC = () => (
 export const ProtectedRoute: React.FC<{
   children: React.ReactNode;
   adminOnly?: boolean;
-  /** Strict admin role (backend settings API is admin-only) */
   adminRoleOnly?: boolean;
-}> = ({ children, adminOnly, adminRoleOnly }) => {
+  pageKey?: PageKey;
+}> = ({ children, adminOnly, adminRoleOnly, pageKey }) => {
   const { isAuthenticated, user, isLoading } = useAuth();
+  const location = useLocation();
+
   if (isLoading) return <PageLoader />;
   if (!isAuthenticated) return <Navigate to="/login" replace />;
+
   if (adminOnly && !['admin', 'manager'].includes(user?.role || '')) {
-    return <Navigate to="/" replace />;
+    return <Navigate to={getHomeRoute(user)} replace />;
   }
   if (adminRoleOnly && user?.role !== 'admin') {
-    return <Navigate to="/" replace />;
+    return <Navigate to={getHomeRoute(user)} replace />;
   }
+
+  if (pageKey) {
+    if (!canAccessPage(user, pageKey)) return <Navigate to={getHomeRoute(user)} replace />;
+  } else if (!canAccessRoute(user, location.pathname)) {
+    return <Navigate to={getHomeRoute(user)} replace />;
+  }
+
   return <>{children}</>;
 };

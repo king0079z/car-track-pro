@@ -75,7 +75,12 @@ export const DahuaCloudConnect: React.FC = () => {
   const loadConfig = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await camerasApi.getHeroA1();
+      const res = await Promise.race([
+        camerasApi.getHeroA1(),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('timeout')), 10000),
+        ),
+      ]);
       const data = res.data as DahuaHeroA1Public;
       const cfg = data.config ?? {};
       setSerial(String(cfg.device_serial || '').trim());
@@ -84,6 +89,12 @@ export const DahuaCloudConnect: React.FC = () => {
       if (cfg.device_serial && cfg.device_type) {
         setQrText(`{SN:${cfg.device_serial},DT:${cfg.device_type},SC:${cfg.security_code || ''}}`);
       }
+    } catch {
+      toast.error('Could not load camera settings');
+    } finally {
+      setLoading(false);
+    }
+    void (async () => {
       try {
         const cloud = await camerasApi.getHeroCloudStatus();
         setCloudOnline(cloud.data.online ?? null);
@@ -96,11 +107,7 @@ export const DahuaCloudConnect: React.FC = () => {
       } catch {
         setDiagnosis(null);
       }
-    } catch {
-      toast.error('Could not load camera settings');
-    } finally {
-      setLoading(false);
-    }
+    })();
   }, []);
 
   useEffect(() => {

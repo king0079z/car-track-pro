@@ -122,6 +122,7 @@ export const anprApi = {
   /** All detections + vehicle info for a specific plate. */
   plate: (plate: string) => api.get(`/api/anpr/plate/${encodeURIComponent(plate)}`),
 
+  detection: (id: number) => api.get(`/api/anpr/detections/${id}`),
   /** Dashboard stats (today count, unique plates, avg speed, linked ratio). */
   stats: () => api.get('/api/anpr/stats'),
 
@@ -200,6 +201,8 @@ export const visionflowApi = {
 // ── Users ─────────────────────────────────────────────────────────────
 export const usersApi = {
   list: () => api.get('/api/users'),
+  roster: () => api.get('/api/users/roster'),
+  pagePermissionsMeta: () => api.get('/api/users/page-permissions-meta'),
   get: (id: number) => api.get(`/api/users/${id}`),
   create: (data: any) => api.post('/api/users', data),
   update: (id: number, data: any) => api.patch(`/api/users/${id}`, data),
@@ -336,7 +339,7 @@ export type RegistryCamera = {
   type: CameraType;
   enabled: boolean;
   slot_index: number;
-  connection_mode: 'lan' | 'auto' | 'p2p';
+  connection_mode: 'lan' | 'auto' | 'p2p' | 'cloud_hls';
   device_serial: string;
   device_type: string;
   security_code: string;
@@ -364,7 +367,20 @@ export type CameraInput = Partial<
     | 'security_code' | 'host' | 'rtsp_port' | 'http_port' | 'username' | 'password'
     | 'stream' | 'use_tcp_transport' | 'rtsp_url' | 'slot_index' | 'meter_per_pixel'
   >
->;
+> & {
+  openapi_app_id?: string;
+  openapi_app_secret?: string;
+  openapi_base_url?: string;
+  openapi_channel?: string;
+  openapi_prefer_hd?: boolean;
+};
+
+export type WifiNetwork = {
+  ssid: string;
+  bssid?: string;
+  intensity?: number;
+  encrypt?: number | string | null;
+};
 
 export type CameraProvisionResult = {
   ok: boolean;
@@ -382,11 +398,11 @@ export const camerasApi = {
   // ── Multi-camera registry (Dahua cloud + generic RTSP/NVR) ──
   list: () => api.get<{ cameras: RegistryCamera[]; count: number }>('/api/cameras'),
   create: (data: CameraInput, connect = true) =>
-    api.post<{ camera: RegistryCamera; provision?: CameraProvisionResult }>(
-      '/api/cameras',
-      data,
-      { params: { connect }, timeout: 30000 },
-    ),
+    api.post<{
+      camera: RegistryCamera;
+      provision?: CameraProvisionResult;
+      bind?: { ok: boolean; error?: string; mine?: boolean; just_bound?: boolean };
+    }>('/api/cameras', data, { params: { connect }, timeout: 45000 }),
   get: (id: string) => api.get<RegistryCamera>(`/api/cameras/${encodeURIComponent(id)}`),
   update: (id: string, data: CameraInput, reconnect = true) =>
     api.patch<{ camera: RegistryCamera; provision?: CameraProvisionResult }>(
@@ -410,12 +426,35 @@ export const camerasApi = {
       {},
       { timeout: 30000 },
     ),
+  ptz: (id: string, direction: string, duration = 1) =>
+    api.post<{ ok: boolean; error?: string; code?: string }>(
+      `/api/cameras/${encodeURIComponent(id)}/ptz`,
+      { direction, duration },
+      { timeout: 10000 },
+    ),
+  wifiCurrent: (id: string) =>
+    api.get<{ ok: boolean; error?: string; ssid?: string | null; linkEnable?: boolean; intensity?: number }>(
+      `/api/cameras/${encodeURIComponent(id)}/wifi`,
+      { timeout: 35000 },
+    ),
+  wifiScan: (id: string) =>
+    api.post<{ ok: boolean; error?: string; networks?: WifiNetwork[] }>(
+      `/api/cameras/${encodeURIComponent(id)}/wifi/scan`,
+      {},
+      { timeout: 50000 },
+    ),
+  wifiSet: (id: string, body: { ssid: string; bssid?: string; password?: string }) =>
+    api.post<{ ok: boolean; error?: string; ssid?: string; code?: string }>(
+      `/api/cameras/${encodeURIComponent(id)}/wifi`,
+      body,
+      { timeout: 120000 },
+    ),
 
   getHeroA1: () => api.get<DahuaHeroA1Public>('/api/cameras/dahua/hero-a1', { timeout: 8000 }),
   getHeroCloudStatus: () =>
     api.get<{ online?: boolean | null; randsalt?: boolean | null; tunnel?: Record<string, unknown> }>(
       '/api/cameras/dahua/hero-a1/cloud-status',
-      { timeout: 25000 },
+      { timeout: 8000 },
     ),
   getHeroLiveSource: () =>
     api.get<{ token: string | null; configured: boolean; rtsp_resolves: boolean }>(
@@ -456,7 +495,7 @@ export const camerasApi = {
       lan_rtsp_reachable: boolean;
       cloud_tunnel_running: boolean;
       fixes: string[];
-    }>('/api/cameras/dahua/hero-a1/diagnose'),
+    }>('/api/cameras/dahua/hero-a1/diagnose', { timeout: 8000 }),
   cartrackRelayStart: () => api.post('/api/cameras/dahua/hero-a1/cartrack-relay/start'),
   cartrackRelayStop: () => api.post('/api/cameras/dahua/hero-a1/cartrack-relay/stop'),
   cartrackRelayStatus: () =>

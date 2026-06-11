@@ -23,9 +23,10 @@ from ..models.anpr import ANPRDetection
 from ..models.vehicle import Vehicle
 from ..models.visit import Visit, VisitStatus, EntryMethod
 from ..schemas.vehicle import VehicleOut
-from ..utils.auth import get_current_user
+from ..utils.auth import get_current_user, require_any_page, require_page
 from ..utils.helpers import generate_visit_number
 from ..utils.qatar_time import qatar_day_start_end, qatar_today
+from ..services.bay_inference import resolve_bay_for_detection, resolve_bay_for_job
 from ..models.user import User
 
 router = APIRouter(prefix="/api/anpr", tags=["ANPR"])
@@ -86,6 +87,7 @@ def _vehicle_out(v: Vehicle) -> dict:
 
 
 def _det_dict(d: ANPRDetection) -> dict:
+    bay_info = resolve_bay_for_detection(d)
     return {
         "id":          d.id,
         "plate":       d.plate,
@@ -100,6 +102,9 @@ def _det_dict(d: ANPRDetection) -> dict:
         "t_enter_sec": d.t_enter_sec,
         "t_exit_sec":  d.t_exit_sec,
         "duration_sec": d.duration_sec,
+        "suggested_bay": bay_info.get("bay"),
+        "camera_name": bay_info.get("camera_name"),
+        "camera_slot": bay_info.get("slot_index"),
     }
 
 
@@ -109,7 +114,7 @@ def _det_dict(d: ANPRDetection) -> dict:
 def sync_detections(
     body: SyncRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_page("visionflow")),
 ):
     """
     Receive the vehicle manifest from a completed VisionFlow job.
@@ -163,7 +168,7 @@ def recent_detections(
     limit: int = Query(default=30, le=200),
     job_id: Optional[str] = Query(default=None),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_page("visionflow")),
 ):
     """Last `limit` ANPR detections ordered newest-first, with vehicle/visit info.
     Optionally filter by job_id to fetch all detections for one VisionFlow job.
@@ -187,7 +192,7 @@ def detections_for_plate(
     plate: str,
     limit: int = Query(default=50, le=200),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_any_page("visionflow", "visits")),
 ):
     """All ANPR detections for a specific plate number (returns vehicle info too)."""
     rows = (
@@ -207,10 +212,28 @@ def detections_for_plate(
     }
 
 
+@router.get("/detections/{detection_id}")
+def get_detection(
+    detection_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_any_page("visionflow", "visits")),
+):
+    """Single ANPR detection with suggested bay from its source camera."""
+    row = (
+        db.query(ANPRDetection)
+        .options(joinedload(ANPRDetection.vehicle), joinedload(ANPRDetection.visit))
+        .filter(ANPRDetection.id == detection_id)
+        .first()
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Detection not found")
+    return _det_dict(row)
+
+
 @router.get("/stats")
 def anpr_stats(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_any_page("dashboard", "visionflow")),
 ):
     """Quick stats for the dashboard widget (today = calendar day in Asia/Qatar)."""
     today_start, _today_end = qatar_day_start_end(qatar_today())
@@ -261,7 +284,7 @@ def create_visit_from_detection(
     detection_id: int,
     body: CreateVisitFromANPR,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_any_page("visionflow", "visits")),
 ):
     """
     Create (or reuse) a Vehicle and open a new Visit from an ANPR detection row.

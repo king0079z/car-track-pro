@@ -535,7 +535,7 @@ export const Login: React.FC = () => {
           {/* Live stats */}
           <div style={{
             marginTop: 32,
-            display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)',
+            display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))',
             gap: 12,
             animation: mounted ? 'statFadeIn 0.8s ease 0.6s both' : 'none',
           }}>

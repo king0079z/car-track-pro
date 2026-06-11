@@ -62,6 +62,14 @@ export function plateActionKey(jobId: string, plate: string) {
   return `${jobId}:${plate}`;
 }
 
+function inferBayFromPanel(label?: string): number | undefined {
+  if (!label) return undefined;
+  const m = label.match(/bay[\s_\-]*#?\s*(\d{1,2})/i) || label.match(/panel[\s_\-]*#?\s*(\d{1,2})/i);
+  if (!m) return undefined;
+  const n = parseInt(m[1], 10);
+  return n >= 1 && n <= 32 ? n : undefined;
+}
+
 export const PlateActionCard: React.FC<{
   pa: PlateAction;
   /** @deprecated Use work-order wizard navigation instead */
@@ -78,7 +86,8 @@ export const PlateActionCard: React.FC<{
     if (pa.detectionId) params.set('detection_id', String(pa.detectionId));
     if (extra?.owner_name) params.set('owner_name', extra.owner_name);
     if (extra?.owner_phone) params.set('owner_phone', extra.owner_phone);
-    if (extra?.assigned_bay != null) params.set('bay', String(extra.assigned_bay));
+    const autoBay = extra?.assigned_bay ?? inferBayFromPanel(pa.panelLabel);
+    if (autoBay != null) params.set('bay', String(autoBay));
     navigate(`/visits/new?${params.toString()}`);
   };
 
@@ -115,7 +124,7 @@ export const PlateActionCard: React.FC<{
 
       {pa.state === 'found' && pa.vehicle && (
         <div style={{ background: 'var(--bg-surface)', borderRadius: 10, padding: '10px 14px', border: '1px solid var(--border-light)' }}>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px 16px', fontSize: 12, marginBottom: 10 }}>
+          <div className="rcols-2" style={{ display: 'grid', gap: '6px 16px', fontSize: 12, marginBottom: 10 }}>
             <span style={{ color: 'var(--text-muted)' }}>Owner</span>
             <span style={{ color: 'var(--text-primary)', fontWeight: 600 }}>{pa.vehicle.owner_name || '—'}</span>
             <span style={{ color: 'var(--text-muted)' }}>Phone</span>
@@ -149,7 +158,7 @@ export const PlateActionCard: React.FC<{
           <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
             This plate is not in CarTrack yet. Register the owner and open a work order:
           </div>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 80px', gap: 8 }}>
+          <div className="rcols-2-80" style={{ display: 'grid', gap: 8 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, background: 'var(--bg-surface)', border: '1px solid var(--border-light)', borderRadius: 8, padding: '6px 10px' }}>
               <User size={12} color="var(--text-muted)" />
               <input value={ownerName} onChange={e => setOwnerName(e.target.value)} placeholder="Owner name" style={{ background: 'none', border: 'none', outline: 'none', fontSize: 12, color: 'var(--text-primary)', width: '100%' }} />

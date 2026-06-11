@@ -272,6 +272,8 @@ class UDP(socket.socket):
 
         if not return_error and res["code"] >= 400:
             self._io(f"Error: {res['status']}")
+            if self.quiet:
+                raise RuntimeError(f"P2P HTTP {res['code']}: {res.get('status', '')}")
             sys.exit(1)
 
         if not self.quiet:

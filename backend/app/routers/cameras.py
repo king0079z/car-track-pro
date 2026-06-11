@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -36,12 +37,22 @@ from ..services.dahua_camera import (
     diagnose_connectivity,
     probe_saved_hero_a1,
     probe_stream,
+    ptz_for_camera,
+    ptz_supported,
     public_dahua_config,
     ptz_move,
     resolve_dahua_source,
     source_for_camera,
+    wifi_supported,
 )
 from ..services.dahua_p2p_tunnel import get_p2p_tunnel_manager
+from ..services.easy4ip_openapi import (
+    easy4ip_ptz,
+    easy4ip_wifi_current,
+    easy4ip_wifi_scan,
+    easy4ip_wifi_set,
+    ensure_device_bound,
+)
 from ..services.live_supervisor import get_live_supervisor
 from ..utils.auth import require_admin
 
@@ -115,21 +126,37 @@ def parse_dahua_qr(
 
 
 @router.get("/dahua/hero-a1")
-def get_dahua_hero_a1() -> JSONResponse:
+async def get_dahua_hero_a1() -> JSONResponse:
     """Public read — password is masked. Does not block on cloud network probes."""
-    return JSONResponse(public_dahua_config())
+    return JSONResponse(await asyncio.to_thread(public_dahua_config))
 
 
 @router.get("/dahua/hero-a1/diagnose")
-def dahua_connect_diagnose(current_user: User = Depends(require_admin)) -> JSONResponse:
+async def dahua_connect_diagnose(current_user: User = Depends(require_admin)) -> JSONResponse:
     """Quick LAN/cloud connectivity hints for the Camera cloud settings tab."""
     cfg = load_camera_config()["dahua_hero_a1"]
-    return JSONResponse(diagnose_connectivity(cfg))
+    return JSONResponse(await asyncio.to_thread(diagnose_connectivity, cfg))
 
 
 @router.get("/dahua/hero-a1/cloud-status")
-def dahua_cloud_status() -> JSONResponse:
-    """Probe Dahua Easy4IP for serial/RandSalt (may take a few seconds)."""
+async def dahua_cloud_status() -> JSONResponse:
+    """Instant cloud summary for settings UI (cached tunnel state; no network probe)."""
+    from ..services.dahua_camera import cloud_device_status_fast, dahua_hero_a1_config
+
+    cfg = dahua_hero_a1_config()
+    serial = str(cfg.get("device_serial") or "").strip()
+    if not serial:
+        raise HTTPException(status_code=400, detail="Enter camera serial (QR) first.")
+    return JSONResponse(
+        await asyncio.to_thread(cloud_device_status_fast, serial, include_tunnel=False)
+    )
+
+
+@router.post("/dahua/hero-a1/cloud-status/probe")
+def dahua_cloud_status_probe(
+    current_user: User = Depends(require_admin),
+) -> JSONResponse:
+    """Background Easy4IP probe (may take 10–30s; do not call on page load)."""
     from ..services.dahua_camera import cloud_device_status_probe, dahua_hero_a1_config
 
     cfg = dahua_hero_a1_config()
@@ -438,26 +465,29 @@ def stop_dahua_p2p(current_user: User = Depends(require_admin)) -> JSONResponse:
 
 
 @router.get("/dahua/hero-a1/p2p/status")
-def dahua_p2p_status(current_user: User = Depends(require_admin)) -> JSONResponse:
-    cfg = dahua_hero_a1_config()
-    tunnel = get_p2p_tunnel_manager().status()
-    preview_url = None
-    if _connection_mode(cfg) == "p2p" and tunnel.get("running"):
-        try:
-            preview_url = build_rtsp_url(
-                host="127.0.0.1",
-                username=str(cfg.get("username") or "admin"),
-                password="********",
-                rtsp_port=int(tunnel.get("local_port") or cfg.get("p2p_local_port") or 18554),
-                stream=str(cfg.get("stream") or "sub"),
-            )
-        except ValueError:
-            preview_url = None
-    return JSONResponse({
-        "connection_mode": _connection_mode(cfg),
-        "tunnel": tunnel,
-        "preview_url": preview_url,
-    })
+async def dahua_p2p_status(current_user: User = Depends(require_admin)) -> JSONResponse:
+    def _payload() -> dict[str, Any]:
+        cfg = dahua_hero_a1_config()
+        tunnel = get_p2p_tunnel_manager().status()
+        preview_url = None
+        if _connection_mode(cfg) == "p2p" and tunnel.get("running"):
+            try:
+                preview_url = build_rtsp_url(
+                    host="127.0.0.1",
+                    username=str(cfg.get("username") or "admin"),
+                    password="********",
+                    rtsp_port=int(tunnel.get("local_port") or cfg.get("p2p_local_port") or 18554),
+                    stream=str(cfg.get("stream") or "sub"),
+                )
+            except ValueError:
+                preview_url = None
+        return {
+            "connection_mode": _connection_mode(cfg),
+            "tunnel": tunnel,
+            "preview_url": preview_url,
+        }
+
+    return JSONResponse(await asyncio.to_thread(_payload))
 
 
 @router.post("/dahua/hero-a1/cartrack-relay/start")
@@ -536,12 +566,13 @@ def discover_dahua_cameras(
 @router.post("/dahua/hero-a1/ptz")
 def dahua_ptz(body: PtzBody, current_user: User = Depends(require_admin)) -> JSONResponse:
     cfg = dahua_hero_a1_config()
+    # cloud_hls → Easy4IP controlMovePTZ; p2p without LAN IP → no HTTP CGI available.
     if _connection_mode(cfg) == "p2p" and not str(cfg.get("host") or "").strip():
         return JSONResponse({
             "ok": False,
-            "error": "Pan/tilt over HTTP is not available in cloud-only mode. Use the DMSS app, or add LAN IP for local PTZ.",
+            "error": "Pan/tilt over HTTP is not available in this mode. Use Cloud HLS, or add a LAN IP for local PTZ.",
         })
-    result = ptz_move(body.direction, duration=body.duration)
+    result = ptz_for_camera(cfg, body.direction, duration=body.duration)
     return JSONResponse(result)
 
 
@@ -576,6 +607,12 @@ class CameraBody(BaseModel):
     rtsp_url: str | None = None
     slot_index: int | None = Field(None, ge=0, le=255)
     meter_per_pixel: float | None = Field(None, ge=0.0, le=0.5)
+    # Cloud HLS (Easy4IP Open Platform) — per-camera overrides; blank → use env app creds
+    openapi_app_id: str | None = None
+    openapi_app_secret: str | None = None
+    openapi_base_url: str | None = None
+    openapi_channel: str | None = None
+    openapi_prefer_hd: bool | None = None
 
 
 def _camera_public(cam: dict[str, Any], *, include_status: bool = True) -> dict[str, Any]:
@@ -639,6 +676,17 @@ def create_camera_endpoint(
             raise HTTPException(status_code=400, detail="RTSP camera requires an rtsp_url or a host/LAN IP.")
     cam = add_camera(data)
     result: dict[str, Any] = {"camera": _camera_public(cam)}
+
+    # Cloud HLS cameras (Easy4IP Open Platform) must be bound to our app account
+    # before live/PTZ work — bind now using the device password.
+    if cam.get("type") == "dahua_p2p" and _connection_mode(cam) == "cloud_hls":
+        bind = ensure_device_bound(cam)
+        result["bind"] = bind
+        if not bind.get("ok"):
+            # Camera saved, but not streamable yet — surface the reason to the UI.
+            result["provision"] = {"ok": False, "error": bind.get("error", "Cloud bind failed")}
+            return JSONResponse(result, status_code=201)
+
     if connect and cam.get("enabled"):
         result["provision"] = provision_camera(cam["id"])
     return JSONResponse(result, status_code=201)
@@ -736,3 +784,68 @@ def test_camera_endpoint(camera_id: str, current_user: User = Depends(require_ad
         raise HTTPException(status_code=400, detail="Camera is not reachable yet (no resolved RTSP source).")
     result = probe_stream(url, timeout_sec=12.0, use_tcp=bool(cam.get("use_tcp_transport", True)))
     return JSONResponse(result)
+
+
+class CameraPtzBody(BaseModel):
+    direction: str = Field(..., description="up | down | left | right | zoom_in | zoom_out | stop | home")
+    duration: int = Field(1, ge=1, le=8)
+
+
+@router.post("/{camera_id}/ptz")
+def camera_ptz_endpoint(
+    camera_id: str, body: CameraPtzBody, current_user: User = Depends(require_admin)
+) -> JSONResponse:
+    """Pan/tilt/zoom any camera — cloud Easy4IP (controlMovePTZ) or LAN HTTP CGI."""
+    cam = get_camera(camera_id)
+    if not cam:
+        raise HTTPException(status_code=404, detail="Camera not found.")
+    if not ptz_supported(cam):
+        return JSONResponse(
+            {"ok": False, "error": "This camera does not support pan/tilt (no cloud serial or LAN IP)."}
+        )
+    return JSONResponse(ptz_for_camera(cam, body.direction, duration=body.duration))
+
+
+class CameraWifiBody(BaseModel):
+    ssid: str = Field(..., min_length=1, max_length=64)
+    bssid: str = Field("", max_length=32)
+    password: str | None = None
+
+
+def _require_wifi_camera(camera_id: str) -> dict[str, Any]:
+    cam = get_camera(camera_id)
+    if not cam:
+        raise HTTPException(status_code=404, detail="Camera not found.")
+    if not wifi_supported(cam):
+        raise HTTPException(
+            status_code=400,
+            detail="Wi-Fi management needs a cloud (Easy4IP) camera with a device serial.",
+        )
+    return cam
+
+
+@router.get("/{camera_id}/wifi")
+def camera_wifi_current_endpoint(
+    camera_id: str, current_user: User = Depends(require_admin)
+) -> JSONResponse:
+    """The Wi-Fi network the camera is currently connected to (cloud cameras)."""
+    cam = _require_wifi_camera(camera_id)
+    return JSONResponse(easy4ip_wifi_current(cam))
+
+
+@router.post("/{camera_id}/wifi/scan")
+def camera_wifi_scan_endpoint(
+    camera_id: str, current_user: User = Depends(require_admin)
+) -> JSONResponse:
+    """Networks the camera can see, to pick a new one to switch to."""
+    cam = _require_wifi_camera(camera_id)
+    return JSONResponse(easy4ip_wifi_scan(cam))
+
+
+@router.post("/{camera_id}/wifi")
+def camera_wifi_set_endpoint(
+    camera_id: str, body: CameraWifiBody, current_user: User = Depends(require_admin)
+) -> JSONResponse:
+    """Switch the camera onto a new Wi-Fi network (slow; camera reboots onto it)."""
+    cam = _require_wifi_camera(camera_id)
+    return JSONResponse(easy4ip_wifi_set(cam, body.ssid.strip(), body.bssid.strip(), body.password or ""))

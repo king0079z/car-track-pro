@@ -40,6 +40,8 @@ else
 fi
 
 CLOUD_DIR="$INSTALL_DIR/deploy/cloud"
+find "$CLOUD_DIR" -name '*.sh' -exec sed -i 's/\r$//' {} + 2>/dev/null || true
+
 if [ ! -f "$CLOUD_DIR/setup-oracle.sh" ]; then
   echo "ERROR: $CLOUD_DIR/setup-oracle.sh not found. Check CARTRACK_REPO_URL."
   exit 1

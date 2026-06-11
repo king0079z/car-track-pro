@@ -9,7 +9,14 @@
       } catch (e) {}
     </script>
     <link rel="icon" type="image/svg+xml" href="/car-icon.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <script>
+      try {
+        if (window.matchMedia('(max-width: 1279px)').matches) {
+          document.documentElement.classList.add('layout-compact');
+        }
+      } catch (e) {}
+    </script>
     <title>CarTrack Pro — AI Car Monitoring System</title>
     <meta name="description" content="AI-powered car care monitoring and analytics system for auto service centers" />
     <link rel="preconnect" href="https://fonts.googleapis.com">

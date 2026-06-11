@@ -4,7 +4,7 @@ from typing import List
 from ..database import get_db
 from ..models.service import Service, ServiceItem
 from ..schemas.service import ServiceCreate, ServiceUpdate, ServiceOut
-from ..utils.auth import get_current_user, require_manager
+from ..utils.auth import get_current_user, require_manager, require_any_page
 from ..models.user import User
 from ..services.service_duration import (
     category_default_duration,
@@ -35,7 +35,7 @@ def _service_out(db: Session, service: Service) -> ServiceOut:
 
 
 @router.get("", response_model=List[ServiceOut])
-def list_services(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def list_services(db: Session = Depends(get_db), current_user: User = Depends(require_any_page("services", "visits"))):
     rows = db.query(Service).filter(Service.is_active == True).order_by(Service.category, Service.name).all()
     return [_service_out(db, s) for s in rows]
 
@@ -58,7 +58,7 @@ def create_service(data: ServiceCreate, db: Session = Depends(get_db), current_u
 
 
 @router.get("/{service_id}", response_model=ServiceOut)
-def get_service(service_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def get_service(service_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_any_page("services", "visits"))):
     service = db.query(Service).filter(Service.id == service_id).first()
     if not service:
         raise HTTPException(status_code=404, detail="Service not found")

@@ -8,6 +8,18 @@
 {$CADDY_DOMAIN} {
 	encode gzip
 
+	# Security headers. `upgrade-insecure-requests` makes the browser silently
+	# fetch any stray http:// subresource over https instead — this removes the
+	# "some parts of this site are not secure" (mixed-content) padlock warning,
+	# whatever the source (cached asset, pasted URL, or extension injection).
+	header {
+		Content-Security-Policy "upgrade-insecure-requests"
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
 	# Backend: REST API (/api/*), VisionFlow live ANPR (/vf/*), + WebSocket (/ws).
 	@backend path /api/* /vf/* /ws /ws/*
 	handle @backend {

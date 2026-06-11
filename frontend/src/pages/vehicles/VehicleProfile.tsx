@@ -531,7 +531,7 @@ export const VehicleProfile: React.FC = () => {
           {/* Info */}
           <div style={{ flex: 1, minWidth: 200 }}>
             {editMode ? (
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+              <div className="rcols-2" style={{ display: 'grid', gap: 10 }}>
                 {[
                   { k: 'make', label: 'Make', placeholder: 'Toyota' },
                   { k: 'model', label: 'Model', placeholder: 'Camry' },

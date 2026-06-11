@@ -28,38 +28,54 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [token, setToken] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
-  // Restore session on mount
+  const persistUser = useCallback((userData: User) => {
+    localStorage.setItem(USER_KEY, JSON.stringify(userData));
+    setUser(userData);
+  }, []);
+
+  // Restore session on mount and refresh permissions from /me
   useEffect(() => {
     const savedToken = localStorage.getItem(TOKEN_KEY);
     const savedUser = localStorage.getItem(USER_KEY);
 
-    if (savedToken && savedUser && !isTokenExpired(savedToken)) {
-      setToken(savedToken);
-      try {
-        setUser(JSON.parse(savedUser));
-      } catch {
+    if (!savedToken || isTokenExpired(savedToken)) {
+      if (savedToken) {
         localStorage.removeItem(TOKEN_KEY);
         localStorage.removeItem(USER_KEY);
       }
-    } else if (savedToken) {
-      // Token exists but expired — clear silently
-      localStorage.removeItem(TOKEN_KEY);
-      localStorage.removeItem(USER_KEY);
+      setIsLoading(false);
+      return;
     }
 
-    setIsLoading(false);
-  }, []);
+    setToken(savedToken);
+    if (savedUser) {
+      try {
+        setUser(JSON.parse(savedUser));
+      } catch {
+        localStorage.removeItem(USER_KEY);
+      }
+    }
+
+    authApi.me()
+      .then(res => persistUser(res.data))
+      .catch(() => {
+        localStorage.removeItem(TOKEN_KEY);
+        localStorage.removeItem(USER_KEY);
+        setToken(null);
+        setUser(null);
+      })
+      .finally(() => setIsLoading(false));
+  }, [persistUser]);
 
   const login = useCallback(async (username: string, password: string) => {
     const res = await authApi.login(username, password);
     const { access_token, user: userData } = res.data;
 
     localStorage.setItem(TOKEN_KEY, access_token);
-    localStorage.setItem(USER_KEY, JSON.stringify(userData));
+    persistUser(userData);
     setToken(access_token);
-    setUser(userData);
     void flushPendingClientErrors();
-  }, []);
+  }, [persistUser]);
 
   const logout = useCallback(() => {
     localStorage.removeItem(TOKEN_KEY);

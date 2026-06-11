@@ -69,6 +69,7 @@ class VisitOut(BaseModel):
     exit_time: Optional[datetime] = None
     duration_minutes: Optional[float] = None
     anpr_camera_seconds: Optional[float] = None
+    anpr_camera_name: Optional[str] = None
     status: VisitStatus
     entry_method: EntryMethod
     plate_image_url: Optional[str] = None
@@ -99,6 +100,8 @@ class InShopVehicleOut(BaseModel):
     work_order_number: Optional[str] = None
     status: Optional[VisitStatus] = None
     assigned_bay: Optional[int] = None
+    suggested_bay: Optional[int] = None
+    camera_name: Optional[str] = None
     entry_time: Optional[datetime] = None
     vehicle_id: Optional[int] = None
     make: Optional[str] = None

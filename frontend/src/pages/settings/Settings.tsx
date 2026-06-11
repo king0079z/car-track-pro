@@ -196,16 +196,7 @@ export const Settings: React.FC = () => {
   );
 
   const ToggleRow: React.FC<{ label: string; desc?: string; k: string }> = ({ label, desc, k }) => (
-    <div
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-        gap: 16,
-        padding: '16px 0',
-        borderBottom: '1px solid var(--border-light)',
-      }}
-    >
+    <div className="settings-toggle-row">
       <div style={{ minWidth: 0 }}>
         <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)' }}>{label}</div>
         {desc && <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4, lineHeight: 1.45 }}>{desc}</div>}
@@ -340,174 +331,42 @@ export const Settings: React.FC = () => {
   }
 
   return (
-    <div className="animate-fade-in" style={{ maxWidth: 1180, margin: '0 auto' }}>
-      <style>{`
-        @keyframes settings-shimmer {
-          0% { background-position: 0% 50%; }
-          100% { background-position: 200% 50%; }
-        }
-        .settings-admin-grid {
-          display: grid;
-          grid-template-columns: minmax(200px, 240px) 1fr;
-          gap: 22px;
-          align-items: start;
-        }
-        @media (max-width: 960px) {
-          .settings-admin-grid { grid-template-columns: 1fr; }
-        }
-      `}</style>
-
+    <div className="settings-page animate-fade-in">
       {/* Hero */}
-      <div
-        style={{
-          position: 'relative',
-          borderRadius: 20,
-          overflow: 'hidden',
-          marginBottom: 22,
-          border: '1px solid var(--border-light)',
-          background: 'linear-gradient(135deg, rgba(37,99,235,0.12) 0%, rgba(124,58,237,0.08) 45%, rgba(15,118,110,0.06) 100%)',
-        }}
-      >
-        <div
-          style={{
-            position: 'absolute',
-            inset: 0,
-            background: 'linear-gradient(105deg, transparent 35%, rgba(255,255,255,0.04) 50%, transparent 65%)',
-            backgroundSize: '200% 100%',
-            animation: 'settings-shimmer 12s ease infinite',
-            pointerEvents: 'none',
-          }}
-        />
-        <div style={{ position: 'relative', padding: '24px 26px 22px', display: 'flex', flexWrap: 'wrap', gap: 18, alignItems: 'flex-start', justifyContent: 'space-between' }}>
-          <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start', minWidth: 0 }}>
-            <div
-              style={{
-                width: 52,
-                height: 52,
-                borderRadius: 16,
-                background: 'linear-gradient(135deg, rgba(37,99,235,0.45), rgba(124,58,237,0.3))',
-                border: '1px solid rgba(147,197,253,0.35)',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                flexShrink: 0,
-              }}
-            >
+      <div className="settings-hero">
+        <div className="settings-hero-shimmer" aria-hidden="true" />
+        <div className="settings-hero-inner">
+          <div className="settings-hero-main">
+            <div className="settings-hero-icon">
               <SettingsIcon size={26} color="#e0e7ff" />
             </div>
             <div style={{ minWidth: 0 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 8 }}>
-                <h1 className="page-title" style={{ margin: 0, fontSize: 26, letterSpacing: '-0.03em' }}>
-                  Control center
-                </h1>
-                <span
-                  style={{
-                    fontSize: 10,
-                    fontWeight: 800,
-                    letterSpacing: '0.14em',
-                    textTransform: 'uppercase',
-                    padding: '5px 11px',
-                    borderRadius: 99,
-                    background: 'rgba(248,113,113,0.12)',
-                    color: 'var(--text-danger)',
-                    border: '1px solid rgba(248,113,113,0.28)',
-                  }}
-                >
-                  Admin only
-                </span>
+              <div className="settings-hero-title-row">
+                <h1 className="page-title settings-hero-title">Control center</h1>
+                <span className="settings-admin-badge">Admin only</span>
               </div>
-              <p style={{ margin: 0, fontSize: 13.5, color: 'var(--text-secondary)', lineHeight: 1.65, maxWidth: 560 }}>
+              <p className="settings-hero-desc">
                 Tune how CarTrack behaves for your shop — hours, revenue rules, AI defaults, security posture, and audit-friendly diagnostics.
                 Changes apply immediately after save for connected clients (some flags refresh on navigation).
               </p>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 14 }}>
-                <Link
-                  to="/users"
-                  style={{
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    gap: 8,
-                    padding: '8px 14px',
-                    borderRadius: 10,
-                    background: 'var(--bg-surface)',
-                    border: '1px solid var(--border-light)',
-                    color: 'var(--text-secondary)',
-                    fontSize: 12.5,
-                    fontWeight: 700,
-                    textDecoration: 'none',
-                  }}
-                >
+              <div className="settings-hero-links">
+                <Link to="/users" className="settings-quick-link">
                   <Users size={14} /> Users
                 </Link>
-                <Link
-                  to="/audit"
-                  style={{
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    gap: 8,
-                    padding: '8px 14px',
-                    borderRadius: 10,
-                    background: 'var(--bg-surface)',
-                    border: '1px solid var(--border-light)',
-                    color: 'var(--text-secondary)',
-                    fontSize: 12.5,
-                    fontWeight: 700,
-                    textDecoration: 'none',
-                  }}
-                >
+                <Link to="/audit" className="settings-quick-link">
                   <Activity size={14} /> Audit & errors
                 </Link>
-                <Link
-                  to="/services"
-                  style={{
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    gap: 8,
-                    padding: '8px 14px',
-                    borderRadius: 10,
-                    background: 'var(--bg-surface)',
-                    border: '1px solid var(--border-light)',
-                    color: 'var(--text-secondary)',
-                    fontSize: 12.5,
-                    fontWeight: 700,
-                    textDecoration: 'none',
-                  }}
-                >
+                <Link to="/services" className="settings-quick-link">
                   <Sparkles size={14} /> Services catalog
                 </Link>
-                <Link
-                  to="/visionflow"
-                  style={{
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    gap: 8,
-                    padding: '8px 14px',
-                    borderRadius: 10,
-                    background: 'var(--bg-surface)',
-                    border: '1px solid var(--border-light)',
-                    color: 'var(--text-secondary)',
-                    fontSize: 12.5,
-                    fontWeight: 700,
-                    textDecoration: 'none',
-                  }}
-                >
+                <Link to="/visionflow" className="settings-quick-link">
                   <Radar size={14} /> ANPR workspace
                 </Link>
               </div>
             </div>
           </div>
 
-          {/* Server pulse */}
-          <div
-            className="card"
-            style={{
-              padding: '14px 18px',
-              borderRadius: 14,
-              border: '1px solid var(--border-light)',
-              minWidth: 220,
-              background: 'var(--bg-surface)',
-            }}
-          >
+          <div className="settings-pulse card">
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
               <Server size={16} color="#34d399" />
               <span style={{ fontSize: 12, fontWeight: 800, color: 'var(--text-primary)', letterSpacing: '0.06em', textTransform: 'uppercase' }}>
@@ -528,9 +387,25 @@ export const Settings: React.FC = () => {
         </div>
       </div>
 
+      {/* Mobile: horizontal section picker */}
+      <div className="settings-mobile-nav" role="tablist" aria-label="Settings sections">
+        {SECTIONS.map(({ id, label, icon: Icon }) => (
+          <button
+            key={id}
+            type="button"
+            role="tab"
+            aria-selected={active === id}
+            className={`settings-mobile-nav-item${active === id ? ' active' : ''}`}
+            onClick={() => setActive(id)}
+          >
+            <Icon size={15} />
+            <span>{label}</span>
+          </button>
+        ))}
+      </div>
+
       <div className="settings-admin-grid">
-        {/* Sidebar */}
-        <aside className="card" style={{ padding: 10, position: 'sticky', top: 12, borderRadius: 16 }}>
+        <aside className="card settings-sidebar-nav">
           <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: '0.12em', color: 'var(--text-muted)', textTransform: 'uppercase', padding: '4px 10px 10px' }}>
             Sections
           </div>
@@ -539,23 +414,7 @@ export const Settings: React.FC = () => {
               key={id}
               type="button"
               onClick={() => setActive(id)}
-              style={{
-                width: '100%',
-                padding: '11px 12px',
-                borderRadius: 11,
-                display: 'flex',
-                alignItems: 'flex-start',
-                gap: 10,
-                border: `1px solid ${active === id ? 'rgba(59,130,246,0.35)' : 'transparent'}`,
-                cursor: 'pointer',
-                background: active === id ? 'rgba(37,99,235,0.12)' : 'transparent',
-                color: active === id ? 'var(--text-accent)' : 'var(--text-secondary)',
-                fontSize: 13,
-                fontWeight: 600,
-                textAlign: 'left',
-                transition: 'all 0.15s',
-                marginBottom: 4,
-              }}
+              className={`settings-nav-item${active === id ? ' active' : ''}`}
             >
               <Icon size={16} style={{ marginTop: 2, flexShrink: 0, opacity: active === id ? 1 : 0.75 }} />
               <span style={{ flex: 1, minWidth: 0 }}>
@@ -578,8 +437,8 @@ export const Settings: React.FC = () => {
         </aside>
 
         {/* Panel */}
-        <div className="card card-p animate-scale-in" style={{ borderRadius: 18, padding: '26px 28px 24px' }} key={active}>
-          <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 14, flexWrap: 'wrap', marginBottom: 8 }}>
+        <div className="card settings-panel animate-scale-in" key={active}>
+          <div className="settings-panel-header">
             <div style={{ display: 'flex', alignItems: 'center', gap: 12, minWidth: 0 }}>
               {activeMeta && (
                 <div
@@ -604,7 +463,7 @@ export const Settings: React.FC = () => {
                 <div style={{ fontSize: 15, fontWeight: 800, color: 'var(--text-primary)', marginTop: 4 }}>{activeMeta?.hint}</div>
               </div>
             </div>
-            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <div className="settings-panel-actions">
               {dirty && (
                 <button type="button" className="btn btn-secondary btn-sm" onClick={() => { setForm(settings || {}); setDirty(false); }}>
                   <X size={14} /> Discard
@@ -731,7 +590,7 @@ export const Settings: React.FC = () => {
                   Opening hours
                 </label>
                 <p style={{ fontSize: 12, color: 'var(--text-muted)', margin: '4px 0 10px' }}>Displayed reference — integrate with your roster as needed.</p>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
+                <div className="rcols-2" style={{ display: 'grid', gap: 14 }}>
                   <input
                     type="time"
                     style={inputStyle}
@@ -913,20 +772,7 @@ export const Settings: React.FC = () => {
           )}
 
           {dirty && (
-            <div
-              style={{
-                marginTop: 26,
-                padding: '14px 18px',
-                borderRadius: 13,
-                background: 'rgba(37,99,235,0.08)',
-                border: '1px solid rgba(59,130,246,0.28)',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                gap: 12,
-                flexWrap: 'wrap',
-              }}
-            >
+            <div className="settings-unsaved-bar">
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: 'var(--text-accent)', fontWeight: 600 }}>
                 <Zap size={15} /> Unsaved changes — remember to save
               </div>

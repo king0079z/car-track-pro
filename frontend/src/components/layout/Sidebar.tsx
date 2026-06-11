@@ -1,162 +1,172 @@
-import React from 'react';
+import React, { useCallback, useRef } from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
 import {
   LayoutDashboard, Car, ClipboardList, BarChart3, Gauge,
   Users, Settings, LogOut, Wrench, Shield,
-  Sun, Moon, Grid2X2, Brain,
+  Sun, Moon, Grid2X2, Brain, X, ChevronRight,
 } from 'lucide-react';
 import { useAuth } from '../../contexts/AuthContext';
 import { useTheme } from '../../contexts/ThemeContext';
+import { NAV_MAIN, NAV_ADMIN, filterNavItems } from '../../lib/permissions';
 
-const navMain = [
-  { to: '/', icon: LayoutDashboard, label: 'Dashboard', end: true },
-  { to: '/visits', icon: ClipboardList, label: 'Visits' },
-  { to: '/vehicles', icon: Car, label: 'Vehicles' },
-  { to: '/fleet-intelligence', icon: Brain, label: 'Fleet intelligence' },
-  { to: '/services', icon: Wrench, label: 'Services' },
-  { to: '/analytics', icon: BarChart3, label: 'Analytics' },
-  { to: '/visionflow', icon: Gauge, label: 'ANPR & speed' },
-  { to: '/visionflow/multicam', icon: Grid2X2, label: 'Camera wall' },
-];
+const ICONS: Record<string, typeof Users> = {
+  dashboard: LayoutDashboard,
+  visits: ClipboardList,
+  vehicles: Car,
+  fleet: Brain,
+  services: Wrench,
+  analytics: BarChart3,
+  visionflow: Gauge,
+  visionflow_multicam: Grid2X2,
+  users: Users,
+  audit: Shield,
+  settings: Settings,
+};
 
-const navAdmin: {
-  to: string;
-  icon: typeof Users;
-  label: string;
-  roles: readonly ('admin' | 'manager')[];
-}[] = [
-  { to: '/users', icon: Users, label: 'Users', roles: ['admin', 'manager'] },
-  { to: '/audit', icon: Shield, label: 'Audit Log', roles: ['admin', 'manager'] },
-  { to: '/settings', icon: Settings, label: 'Settings', roles: ['admin'] },
-];
+interface SidebarProps {
+  open?: boolean;
+  onClose?: () => void;
+}
 
-export const Sidebar: React.FC = () => {
+export const Sidebar: React.FC<SidebarProps> = ({ open = false, onClose }) => {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
   const { toggle, isDark } = useTheme();
-  const isAdmin = ['admin', 'manager'].includes(user?.role || '');
+  const mainNav = filterNavItems(NAV_MAIN, user);
+  const adminNav = filterNavItems(NAV_ADMIN, user);
+  const touchStartX = useRef<number | null>(null);
+
+  const handleNavClick = useCallback(() => {
+    onClose?.();
+  }, [onClose]);
+
+  const handleLogout = useCallback(() => {
+    onClose?.();
+    logout();
+    navigate('/login');
+  }, [logout, navigate, onClose]);
+
+  const onTouchStart = useCallback((e: React.TouchEvent) => {
+    touchStartX.current = e.touches[0]?.clientX ?? null;
+  }, []);
+
+  const onTouchEnd = useCallback((e: React.TouchEvent) => {
+    const start = touchStartX.current;
+    if (start == null) return;
+    const end = e.changedTouches[0]?.clientX ?? start;
+    if (end - start < -72) onClose?.();
+    touchStartX.current = null;
+  }, [onClose]);
+
+  const renderNavLink = (item: typeof NAV_MAIN[number]) => {
+    const Icon = ICONS[item.pageKey] ?? ClipboardList;
+    return (
+      <NavLink
+        key={item.to}
+        to={item.to}
+        end={item.end}
+        onClick={handleNavClick}
+        className={({ isActive }) => `nav-item${isActive ? ' active' : ''}`}
+      >
+        <span className="nav-item-icon" aria-hidden="true">
+          <Icon size={18} strokeWidth={2} />
+        </span>
+        <span className="nav-item-label">{item.label}</span>
+        <ChevronRight size={16} className="nav-item-chevron" aria-hidden="true" />
+      </NavLink>
+    );
+  };
 
   return (
-    <aside className="sidebar">
-      {/* Logo */}
+    <aside
+      className={`sidebar${open ? ' open' : ''}`}
+      aria-hidden={!open ? true : undefined}
+      onTouchStart={onTouchStart}
+      onTouchEnd={onTouchEnd}
+    >
+      <div className="mobile-drawer-accent" aria-hidden="true" />
+      <div className="mobile-drawer-handle" aria-hidden="true" />
+
+      <div className="mobile-drawer-header">
+        <div className="mobile-drawer-user">
+          <div className="mobile-drawer-avatar">{user?.full_name?.[0]?.toUpperCase()}</div>
+          <div className="mobile-drawer-user-text">
+            <div className="mobile-drawer-user-name">{user?.full_name}</div>
+            <div className="mobile-drawer-user-role">{user?.role}</div>
+          </div>
+        </div>
+        <button
+          type="button"
+          className="nav-toggle nav-toggle--close mobile-drawer-close"
+          onClick={onClose}
+          aria-label="Close menu"
+        >
+          <X size={20} strokeWidth={2.25} />
+        </button>
+      </div>
+
       <div className="sidebar-logo">
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <div style={{
-            width: 36, height: 36, borderRadius: 10,
-            background: 'linear-gradient(135deg, #1d4ed8, #7c3aed)',
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            boxShadow: '0 4px 12px rgba(37,99,235,0.35)',
-            flexShrink: 0,
-          }}>
+        <div className="sidebar-brand-row">
+          <div className="sidebar-brand-mark">
             <Car size={18} color="white" />
           </div>
           <div>
-            <div style={{ fontSize: 14, fontWeight: 800, color: 'var(--text-primary)', letterSpacing: '-0.2px' }}>
-              CarTrack Pro
-            </div>
-            <div style={{ fontSize: 10, color: 'var(--text-muted)', fontWeight: 500 }}>
-              AI Monitoring System
-            </div>
+            <div className="sidebar-brand-title">CarTrack Pro</div>
+            <div className="sidebar-brand-sub">AI Monitoring System</div>
           </div>
         </div>
-
-        {/* Live indicator */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 14 }}>
-          <div style={{ position: 'relative', width: 8, height: 8 }}>
-            <div style={{
-              position: 'absolute', inset: 0, borderRadius: '50%',
-              background: '#10b981', animation: 'pingAnim 1.5s ease-in-out infinite', opacity: 0.6,
-            }} />
-            <div style={{ width: 8, height: 8, borderRadius: '50%', background: '#10b981' }} />
-          </div>
-          <span style={{ fontSize: 11, color: '#10b981', fontWeight: 500 }}>System Live</span>
+        <div className="sidebar-live-pill">
+          <span className="sidebar-live-dot" />
+          <span>System Live</span>
         </div>
       </div>
 
-      {/* Navigation */}
-      <nav className="sidebar-nav">
-        <div className="nav-section-label">Main</div>
-        {navMain.map(({ to, icon: Icon, label, end }) => (
-          <NavLink
-            key={to}
-            to={to}
-            end={end}
-            className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}
-          >
-            <Icon size={16} />
-            <span>{label}</span>
-          </NavLink>
-        ))}
-
-        {isAdmin && (
+      <nav className="sidebar-nav" aria-label="Main navigation">
+        {mainNav.length > 0 && (
           <>
-            <div className="nav-section-label" style={{ marginTop: 8 }}>Admin</div>
-            {navAdmin
-              .filter(item => user?.role && (item.roles as readonly string[]).includes(user.role))
-              .map(({ to, icon: Icon, label }) => (
-              <NavLink
-                key={to}
-                to={to}
-                className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}
-              >
-                <Icon size={16} />
-                <span>{label}</span>
-              </NavLink>
-            ))}
+            <div className="nav-section-label">Main menu</div>
+            {mainNav.map(renderNavLink)}
+          </>
+        )}
+
+        {adminNav.length > 0 && (
+          <>
+            <div className="nav-section-label nav-section-label--admin">Administration</div>
+            {adminNav.map(renderNavLink)}
           </>
         )}
       </nav>
 
-      {/* Footer */}
       <div className="sidebar-footer">
-        {/* Theme Toggle */}
         <button
+          type="button"
+          className="mobile-theme-toggle"
           onClick={toggle}
-          title={isDark ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
-          style={{
-            display: 'flex', alignItems: 'center', gap: 8, width: '100%',
-            padding: '9px 12px', borderRadius: 8, marginBottom: 8,
-            background: isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.04)',
-            border: `1px solid var(--border-light)`,
-            cursor: 'pointer', transition: 'all 0.2s',
-            color: 'var(--text-secondary)', fontSize: 12, fontWeight: 600,
-          }}
-          onMouseEnter={e => { (e.currentTarget as HTMLElement).style.background = 'var(--bg-elevated)'; (e.currentTarget as HTMLElement).style.color = 'var(--text-primary)'; }}
-          onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.04)'; (e.currentTarget as HTMLElement).style.color = 'var(--text-secondary)'; }}
+          aria-label={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
         >
-          {isDark
-            ? <><Sun size={14} color="var(--text-warning)" /><span>Light Mode</span></>
-            : <><Moon size={14} color="#818cf8" /><span>Dark Mode</span></>}
-          {/* Toggle pill */}
-          <div style={{ marginLeft: 'auto', width: 34, height: 18, borderRadius: 99, background: isDark ? '#374151' : '#2563eb', position: 'relative', transition: 'background 0.3s' }}>
-            <div style={{
-              position: 'absolute', top: 2, left: isDark ? 2 : 18,
-              width: 14, height: 14, borderRadius: '50%', background: 'white',
-              transition: 'left 0.3s', boxShadow: '0 1px 4px rgba(0,0,0,0.3)',
-            }} />
-          </div>
+          <span className="mobile-theme-toggle-left">
+            {isDark ? <Sun size={18} /> : <Moon size={18} />}
+            <span>{isDark ? 'Light mode' : 'Dark mode'}</span>
+          </span>
+          <span className={`mobile-theme-switch${isDark ? ' on' : ''}`} aria-hidden="true">
+            <span className="mobile-theme-switch-knob" />
+          </span>
         </button>
 
-        {/* User Card */}
-        <div className="user-card" onClick={() => { logout(); navigate('/login'); }}>
+        <button type="button" className="mobile-sign-out" onClick={handleLogout}>
+          <LogOut size={18} />
+          <span>Sign out</span>
+        </button>
+
+        <div className="user-card desktop-only-user" onClick={handleLogout}>
           <div className="user-avatar">{user?.full_name?.[0]?.toUpperCase()}</div>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {user?.full_name}
-            </div>
-            <div style={{ fontSize: 11, color: 'var(--text-muted)', textTransform: 'capitalize' }}>
-              {user?.role}
-            </div>
+          <div className="user-card-text">
+            <div className="user-card-name">{user?.full_name}</div>
+            <div className="user-card-role">{user?.role}</div>
           </div>
           <LogOut size={14} color="var(--text-muted)" />
         </div>
       </div>
-
-      <style>{`
-        @keyframes pingAnim {
-          75%, 100% { transform: scale(2.5); opacity: 0; }
-        }
-      `}</style>
     </aside>
   );
 };

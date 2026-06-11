@@ -1,5 +1,6 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Outlet, useLocation } from 'react-router-dom';
+import { Car, Menu } from 'lucide-react';
 import { Sidebar } from './Sidebar';
 import { Toaster } from 'react-hot-toast';
 import { GlobalSearch } from '../GlobalSearch';
@@ -7,9 +8,12 @@ import { ClientErrorBoundary } from '../ClientErrorBoundary';
 import { settingsApi } from '../../services/api';
 import { VERCEL_MISSING_API } from '../../services/apiConfig';
 import { syncClientTimeFromPublicSettings } from '../../lib/qatarTime';
+import { useCompactLayout } from '../../hooks/useCompactLayout';
 
 export const Layout: React.FC = () => {
   const location = useLocation();
+  const [navOpen, setNavOpen] = useState(false);
+  useCompactLayout();
 
   useEffect(() => {
     settingsApi
@@ -23,6 +27,22 @@ export const Layout: React.FC = () => {
       });
   }, []);
 
+  // Close the mobile drawer whenever the route changes
+  useEffect(() => { setNavOpen(false); }, [location.pathname]);
+
+  // Lock body scroll + Escape to close drawer on mobile
+  useEffect(() => {
+    if (!navOpen) return;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setNavOpen(false); };
+    window.addEventListener('keydown', onKey);
+    return () => {
+      document.body.style.overflow = prev;
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [navOpen]);
+
   return (
   <div className="app-layout">
     {VERCEL_MISSING_API && (
@@ -35,18 +55,38 @@ export const Layout: React.FC = () => {
         See docs/VERCEL.md in the repo.
       </div>
     )}
-    <Sidebar />
+    {navOpen && (
+      <div
+        className="sidebar-overlay"
+        onClick={() => setNavOpen(false)}
+        aria-hidden="true"
+      />
+    )}
+    <Sidebar open={navOpen} onClose={() => setNavOpen(false)} />
     <main className="app-main">
-      {/* Top bar with global search */}
-      <div style={{
-        position: 'sticky', top: 0, zIndex: 100,
-        background: 'var(--topbar-bg)', backdropFilter: 'blur(12px)',
-        borderBottom: '1px solid var(--border-light)',
-        padding: '10px 24px',
-        display: 'flex', alignItems: 'center', justifyContent: 'flex-end',
-      }}>
+      <header className="desktop-topbar">
         <GlobalSearch />
-      </div>
+      </header>
+      <header className="mobile-topbar">
+        <button
+          type="button"
+          className="nav-toggle nav-toggle--open"
+          onClick={() => setNavOpen(true)}
+          aria-label="Open menu"
+          aria-expanded={navOpen}
+        >
+          <Menu size={22} strokeWidth={2.25} />
+        </button>
+        <div className="mobile-topbar-brand">
+          <div className="mobile-topbar-logo">
+            <Car size={16} color="white" />
+          </div>
+          <span className="mobile-topbar-title">CarTrack Pro</span>
+        </div>
+        <div className="mobile-topbar-search">
+          <GlobalSearch />
+        </div>
+      </header>
       <div className="page-container animate-fade-in">
         <ClientErrorBoundary key={location.pathname + location.search}>
           <Outlet />

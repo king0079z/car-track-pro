@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Enum
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, Enum, Text
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 import enum
@@ -24,6 +24,8 @@ class User(Base):
     phone = Column(String(20))
     avatar_url = Column(String(500))
     is_active = Column(Boolean, default=True)
+    # JSON list of page keys; null = role defaults (see permissions.py)
+    allowed_pages = Column(Text, nullable=True)
     last_login = Column(DateTime(timezone=True))
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())

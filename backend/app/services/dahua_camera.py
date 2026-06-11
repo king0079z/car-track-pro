@@ -25,6 +25,7 @@ from urllib.parse import quote, urlparse
 
 import cv2
 
+from ..config import settings
 from .camera_config import DEFAULT_DAHUA_HERO_A1, load_camera_config
 
 _log = logging.getLogger(__name__)
@@ -46,7 +47,7 @@ HERO_A1_PROFILE: dict[str, Any] = {
     "name": "Dahua Hero A1 Indoor Pan/Tilt Wi-Fi Camera",
     "manufacturer": "Dahua",
     "connection_type": "wifi_rtsp",
-    "connection_modes": ["lan", "p2p", "auto", "cartrack_relay"],
+    "connection_modes": ["lan", "p2p", "auto", "cartrack_relay", "cloud_hls"],
     "usb_note": (
         "USB-C on this camera is for power only. Video uses Wi-Fi RTSP (LAN) or "
         "Dahua cloud P2P (like DMSS) when serial number is configured."
@@ -262,6 +263,8 @@ def resolve_cartrack_view_rtsp(
 
 def _connection_mode(cfg: dict[str, Any]) -> str:
     mode = str(cfg.get("connection_mode") or "lan").strip().lower()
+    if mode in ("cloud_hls", "easy4ip", "openapi", "imou", "easy4ip_hls"):
+        return "cloud_hls"
     if mode in ("p2p", "cloud", "remote"):
         return "p2p"
     if mode == "auto":
@@ -320,7 +323,13 @@ def _dahua_is_configured(cfg: dict[str, Any]) -> bool:
     if not cfg.get("enabled"):
         return False
     mode = _connection_mode(cfg)
-    mode = _connection_mode(cfg)
+    if mode == "cloud_hls":
+        # Needs the device serial + OpenAPI app creds (cfg or env).
+        from .easy4ip_openapi import get_openapi_client
+
+        return bool(str(cfg.get("device_serial") or "").strip()) and (
+            get_openapi_client(cfg) is not None
+        )
     if mode == "cartrack_relay":
         return bool(str(cfg.get("host") or "").strip())
     if mode in ("p2p", "auto"):
@@ -377,6 +386,33 @@ def resolve_dahua_source(source: str | None) -> str | None:
     stream = str(cfg.get("stream") or "sub")
 
     mode = _connection_mode(cfg)
+    if mode == "cloud_hls":
+        # Official Imou/Easy4IP Open Platform: cloud-served HLS (.m3u8). Pure
+        # cloud, CGNAT-proof, FFmpeg-native — replaces the fragile PTCP relay.
+        from . import stream_governor
+        from .easy4ip_openapi import resolve_easy4ip_hls
+        from .live_camera import normalize_live_source
+
+        gv_key = normalize_live_source(source)
+        allow_hd = bool(cfg.get("openapi_prefer_hd", True))
+        stream_governor.register_cloud_source(gv_key, allow_hd=allow_hd)
+
+        # Hybrid SD/HD: the governor picks the quota-friendly SD sub-stream by
+        # default and requests HD only while a plate is in frame.
+        prefer_hd_override: bool | None = None
+        if stream_governor.is_adaptive(gv_key) and bool(
+            getattr(settings, "STREAM_HYBRID_ENABLED", True)
+        ):
+            prefer_hd_override = stream_governor.preferred_tier(gv_key) == "hd" and allow_hd
+
+        hls = resolve_easy4ip_hls(cfg, prefer_hd_override=prefer_hd_override)
+        if hls:
+            if prefer_hd_override is not None:
+                stream_governor.set_active_tier(gv_key, "hd" if prefer_hd_override else "sd")
+            return hls
+        _log.warning("Easy4IP cloud HLS not available (check OpenAPI creds / device online).")
+        return None
+
     if mode == "cartrack_relay":
         from .cartrack_cloud_relay import get_cartrack_relay_manager, relay_urls_from_config
 
@@ -456,7 +492,20 @@ def resolve_dahua_source(source: str | None) -> str | None:
     )
 
 
-def cloud_device_status_fast(serial: str) -> dict[str, Any]:
+def invalidate_dahua_cloud_cache(source: str | None) -> None:
+    """Drop the cached cloud HLS URL for a Dahua source so the next resolve
+    fetches a fresh one (called when a cached URL fails to open)."""
+    if not is_dahua_alias(source):
+        return
+    cfg = _camera_cfg_for_id(dahua_id_from_source(source))
+    if not cfg or _connection_mode(cfg) != "cloud_hls":
+        return
+    from .easy4ip_openapi import invalidate_hls_cache
+
+    invalidate_hls_cache(cfg)
+
+
+def cloud_device_status_fast(serial: str, *, include_tunnel: bool = True) -> dict[str, Any]:
     """Instant cloud summary for settings UI (no network — avoids blocking page load)."""
     serial = (serial or "").strip().upper()
     if not serial:
@@ -474,12 +523,18 @@ def cloud_device_status_fast(serial: str) -> dict[str, Any]:
 
         cached = _SALT_CACHE.get(serial)
         salt_known = bool(cached and cached[0]) if cached else None
+        tunnel: dict[str, Any] = {}
+        if include_tunnel:
+            try:
+                tunnel = get_p2p_tunnel_manager().status()
+            except Exception:
+                tunnel = {}
         return {
             "online": salt_known,
             "randsalt": salt_known,
             "deps_ok": True,
             "cached": bool(cached),
-            "tunnel": get_p2p_tunnel_manager().status(),
+            "tunnel": tunnel,
         }
     except Exception as exc:
         _log.warning("cloud_device_status_fast failed: %s", exc)
@@ -574,13 +629,46 @@ def public_dahua_config() -> dict[str, Any]:
     }
 
 
-def _ffmpeg_rtsp_options(use_tcp: bool) -> str:
+def _ffmpeg_rtsp_options(use_tcp: bool, *, relay: bool = False) -> str:
     transport = "tcp" if use_tcp else "udp"
+    if relay:
+        # Easy4IP media-relay path: the RTSP negotiation + first keyframe travel
+        # VPS → Dahua relay agent → camera (behind CGNAT), so the open phase is far
+        # slower than a LAN camera. Give FFmpeg/OpenCV enough patience to ride out
+        # that warm-up (both stimeout and the newer `timeout` key, name varies by
+        # FFmpeg build), and keep a small reorder buffer to absorb relay jitter.
+        return (
+            f"rtsp_transport;{transport}"
+            "|stimeout;45000000|timeout;45000000|rw_timeout;45000000"
+            "|max_delay;500000|reorder_queue_size;512"
+            "|fflags;nobuffer|flags;low_delay"
+        )
     # stimeout/rw_timeout in microseconds — avoid 30s OpenCV hang on unreachable hosts
     return (
         f"rtsp_transport;{transport}|stimeout;15000000|rw_timeout;20000000"
         "|fflags;nobuffer|flags;low_delay|max_delay;0"
     )
+
+
+def _ffmpeg_hls_options() -> str:
+    """FFmpeg options for cloud HLS (.m3u8 over http/https), e.g. Easy4IP Open
+    Platform. HLS first-frame is slow on a cold stream and the cloud edge can
+    briefly drop segments, so enable transparent reconnect and a generous read
+    timeout instead of the RTSP-oriented options."""
+    return (
+        "reconnect;1|reconnect_streamed;1|reconnect_on_network_error;1"
+        "|reconnect_delay_max;5|rw_timeout;30000000|timeout;30000000"
+        "|fflags;nobuffer|flags;low_delay"
+    )
+
+
+def _is_relay_tunnel_url(rtsp_url: str) -> bool:
+    """True for RTSP URLs served by a local Easy4IP P2P/relay tunnel (127.0.0.1:1855x)."""
+    try:
+        host = urlparse(rtsp_url).hostname or ""
+    except Exception:
+        return False
+    return host in ("127.0.0.1", "localhost", "::1")
 
 
 def _md5_hex(value: str) -> str:
@@ -799,7 +887,12 @@ def open_dahua_stream(
     import os
 
     prev = os.environ.get("OPENCV_FFMPEG_CAPTURE_OPTIONS")
-    os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = _ffmpeg_rtsp_options(use_tcp)
+    scheme = (urlparse(rtsp_url).scheme or "").lower()
+    if scheme in ("http", "https"):
+        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = _ffmpeg_hls_options()
+    else:
+        relay = _is_relay_tunnel_url(rtsp_url)
+        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = _ffmpeg_rtsp_options(use_tcp, relay=relay)
     cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
     try:
         cap.set(cv2.CAP_PROP_BUFFERSIZE, buffer_size)
@@ -825,6 +918,42 @@ def probe_stream(
     parsed = urlparse(rtsp_url)
     user = normalize_dahua_username(username or (parsed.username or "admin"))
     pwd = password if password is not None else (parsed.password or "")
+
+    # Cloud HLS / HTTP(S) streams (Easy4IP Open Platform .m3u8) carry no RTSP
+    # digest auth — open them directly with OpenCV (FFmpeg) and read a frame.
+    scheme = (parsed.scheme or "").lower()
+    if scheme in ("http", "https"):
+        # Cold HLS first-frame can take 10-20s while the cloud edge spins up the
+        # live session; use the reconnect-tolerant opener and wait generously.
+        cap = open_dahua_stream(rtsp_url, use_tcp=use_tcp)
+        try:
+            deadline = started + max(25.0, float(timeout_sec))
+            opened = cap.isOpened()
+            while time.monotonic() < deadline:
+                if not opened:
+                    opened = cap.isOpened()
+                if opened:
+                    ret, _ = cap.read()
+                    if ret:
+                        return {
+                            "ok": True,
+                            "width": int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0),
+                            "height": int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0),
+                            "fps": round(float(cap.get(cv2.CAP_PROP_FPS) or 0.0), 2),
+                            "connection_mode": "cloud_hls",
+                            "elapsed_ms": int((time.monotonic() - started) * 1000),
+                        }
+                time.sleep(0.25)
+            return {
+                "ok": False,
+                "error": (
+                    "Cloud stream opened but no frame arrived in time. The camera may be "
+                    "waking, busy in another app (close DMSS/Imou Life), or on weak Wi-Fi. Try again."
+                ),
+                "elapsed_ms": int((time.monotonic() - started) * 1000),
+            }
+        finally:
+            cap.release()
 
     is_tunnel = _is_local_tunnel_host(parsed.hostname)
     if not is_tunnel:
@@ -1214,6 +1343,94 @@ def ptz_command(
         return {"ok": False, "error": str(exc)}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
+
+
+# Map UI directions → Imou cloud PTZ operations (controlMovePTZ).
+_CLOUD_PTZ_OPS = {
+    "up": "up",
+    "down": "down",
+    "left": "left",
+    "right": "right",
+    "zoom_in": "zoom_in",
+    "zoom_out": "zoom_out",
+    "stop": "stop",
+}
+
+
+def ptz_supported(cfg: dict[str, Any]) -> bool:
+    """True if this camera can pan/tilt: cloud HLS (with serial) or LAN HTTP CGI."""
+    mode = _connection_mode(cfg)
+    if mode == "cloud_hls":
+        return bool(str(cfg.get("device_serial") or "").strip())
+    return bool(str(cfg.get("host") or "").strip())
+
+
+def wifi_supported(cfg: dict[str, Any]) -> bool:
+    """True if we can manage this camera's Wi-Fi over the cloud (Easy4IP, with serial)."""
+    if not str(cfg.get("device_serial") or "").strip():
+        return False
+    try:
+        from .easy4ip_openapi import get_openapi_client
+
+        return get_openapi_client(cfg) is not None
+    except Exception:
+        return False
+
+
+def ptz_for_camera(cfg: dict[str, Any], direction: str, *, duration: int = 1) -> dict[str, Any]:
+    """PTZ for any camera cfg: cloud (Easy4IP controlMovePTZ) or LAN (Dahua CGI)."""
+    mode = _connection_mode(cfg)
+    direction = (direction or "").strip().lower()
+
+    if mode == "cloud_hls":
+        op = _CLOUD_PTZ_OPS.get(direction)
+        if not op:
+            return {"ok": False, "error": f"Unsupported PTZ direction for cloud camera: {direction}"}
+        from .easy4ip_openapi import easy4ip_ptz
+
+        # UI duration is a 1..8 "nudge" scale; map to a sensible millisecond pulse.
+        duration_ms = max(1, min(8, int(duration))) * 350
+        return easy4ip_ptz(cfg, op, duration_ms)
+
+    # LAN / HTTP CGI fallback
+    host = str(cfg.get("host") or "").strip()
+    if not host:
+        return {"ok": False, "error": "Camera has no LAN IP and is not in cloud mode — cannot pan/tilt."}
+    code_map = {"up": "Up", "down": "Down", "left": "Left", "right": "Right", "home": "ToPreset"}
+    code = code_map.get(direction)
+    if not code:
+        return {"ok": False, "error": f"Unknown direction: {direction}"}
+    username = str(cfg.get("username") or "admin")
+    password = str(cfg.get("password") or "")
+    http_port = int(cfg.get("http_port") or 80)
+    start = ptz_command(
+        host=host, username=username, password=password, http_port=http_port,
+        action="start", code=code, arg2=max(1, min(8, int(duration))),
+    )
+    if not start.get("ok"):
+        return start
+    time.sleep(0.25)
+    stop = ptz_command(
+        host=host, username=username, password=password, http_port=http_port,
+        action="stop", code=code,
+    )
+    return {"ok": True, "start": start, "stop": stop}
+
+
+def ptz_info_for_source(source: str | None) -> dict[str, Any]:
+    """Map a live source string to its camera id + PTZ capability for the UI.
+
+    Returns {camera_id, ptz_supported}. Non-Dahua sources (USB index, plain
+    RTSP) report no PTZ here."""
+    if not is_dahua_alias(source):
+        return {"camera_id": None, "ptz_supported": False, "wifi_supported": False}
+    cid = dahua_id_from_source(source)
+    cfg = _camera_cfg_for_id(cid)
+    return {
+        "camera_id": cid,
+        "ptz_supported": bool(cfg and ptz_supported(cfg)),
+        "wifi_supported": bool(cfg and wifi_supported(cfg)),
+    }
 
 
 def ptz_move(direction: str, *, duration: int = 1) -> dict[str, Any]:

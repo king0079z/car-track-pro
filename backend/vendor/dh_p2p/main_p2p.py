@@ -9,12 +9,15 @@ import select
 import socket
 import subprocess
 import sys
+import threading
+import time
 from urllib.parse import quote
 
 from helpers import (
     MAIN_PORT,
     MAIN_SERVER,
     UDP,
+    PTCP,
     PTCPPayload,
     extract_randsalt_from_info,
     get_auth,
@@ -96,10 +99,233 @@ def _stun_local_host(device_laddr: str) -> tuple[str, int]:
         raise
 
 
-def main(serial, dtype=0, username=None, password=None, debug=False, local_port=18554, quiet=True):
+_HEARTBEAT_BODY = b"\x13" + b"\x00" * 11  # PTCP Heartbeat (keeps the session warm)
+_SERVE_DEBUG = (os.environ.get("P2P_SERVE_DEBUG") or "").strip().lower() in ("1", "true", "yes")
+
+
+def _serve(conn, socketserver, *, local_port: int, debug: bool = False) -> None:
+    """Bridge local TCP (RTSP) clients to the camera over an established PTCP
+    session.
+
+    Concurrency model mirrors the reference Rust relay (khoanguyen-3fc/dh-p2p):
+    a dedicated *device-reader* drains the UDP/PTCP socket as fast as datagrams
+    arrive and ACKs every non-empty packet immediately, while a *client-reader*
+    forwards TCP→device and a heartbeat keeps the link warm. The previous
+    single-threaded select loop forwarded to the client (a blocking TCP write)
+    between device reads, so under the post-PLAY RTP flood it could not ACK fast
+    enough — the device's send window filled and the stream stalled after the
+    first few KB. Decoupling the device drain from the client write fixes the
+    sustained-flow stall (the reason FFmpeg/OpenCV opened but decoded 0 frames).
+
+    ``conn`` is the UDP socket carrying the session (``device_remote`` for direct,
+    ``main_remote`` for relay). All PTCP counter mutations on ``conn`` are
+    serialized by ``session_lock`` since reader/writer/heartbeat run concurrently.
+    """
+    session_lock = threading.Lock()
+    last_idle_hb = [0.0]
+
+    while True:
+        ready, _, _ = select.select([socketserver], [], [], 0.1)
+
+        if not ready:
+            # Idle (no client connected): drain any agent/device control packets
+            # so the socket buffer never backs up, and keep the link warm with a
+            # heartbeat at most every 5s.
+            ptcp_ready, _, _ = select.select([conn], [], [], 0)
+            with session_lock:
+                if ptcp_ready:
+                    try:
+                        res = conn.read_ptcp()
+                        if len(res.body) > 0:
+                            conn.request_ptcp()
+                    except (OSError, ValueError):
+                        pass
+                elif time.monotonic() - last_idle_hb[0] >= 5.0:
+                    last_idle_hb[0] = time.monotonic()
+                    try:
+                        conn.request_ptcp(_HEARTBEAT_BODY)
+                    except OSError:
+                        pass
+            if not ptcp_ready:
+                time.sleep(0.2)
+            continue
+
+        socketclient, address = socketserver.accept()
+        print(f"Connection from {address}", flush=True)
+        realm_id = random.randint(0x00000000, 0xFFFFFFFF)
+
+        if not _bind_realm(conn, socketclient, realm_id, session_lock):
+            try:
+                socketclient.close()
+            except OSError:
+                pass
+            continue
+
+        _pump_client(conn, socketclient, realm_id, session_lock)
+
+
+def _bind_realm(conn, socketclient, realm_id: int, session_lock) -> bool:
+    """Open a PTCP realm for this client (Bind 0x11 → wait for Status 0x12).
+
+    Tolerates interleaved empty ACKs / heartbeats / early payload before the
+    confirmation instead of asserting (a crash here would kill the tunnel).
+    """
+    try:
+        with session_lock:
+            conn.request_ptcp(
+                b"\x11\x00\x00\x00"
+                + realm_id.to_bytes(4, "big")
+                + b"\x00\x00\x00\x00"
+                # port 554 → the camera's local RTSP service (127.0.0.1:554)
+                + b"\x00\x00\x02\x2A"
+                + b"\x7f\x00\x00\x01",
+            )
+        bind_deadline = time.monotonic() + 15.0
+        while time.monotonic() < bind_deadline:
+            rdy, _, _ = select.select([conn], [], [], 0.5)
+            if not rdy:
+                continue
+            with session_lock:
+                res = conn.read_ptcp()
+                if len(res.body) == 0:
+                    continue
+                conn.request_ptcp()
+                code = res.body[0]
+                early = None
+                if code == 0x10:
+                    early = PTCPPayload.parse(res.body).payload
+            if code == 0x12:
+                if _SERVE_DEBUG:
+                    print("realm bound; entering data loop", flush=True)
+                return True
+            if early is not None:
+                socketclient.send(early)
+        print("Realm bind not confirmed; closing client", flush=True)
+        return False
+    except (OSError, ValueError, AssertionError) as exc:
+        print(f"Realm open failed ({exc}); closing client", flush=True)
+        return False
+
+
+def _pump_client(conn, socketclient, realm_id: int, session_lock) -> None:
+    """Run concurrent device-reader / client-reader / heartbeat until either
+    side closes, then tear the realm down (DISC)."""
+    stop = threading.Event()
+
+    def device_reader() -> None:
+        try:
+            while not stop.is_set():
+                rdy, _, _ = select.select([conn], [], [], 0.5)
+                if not rdy:
+                    continue
+                try:
+                    data = conn.recv(65536)
+                except OSError:
+                    break
+                with session_lock:
+                    try:
+                        res = PTCP.parse(data)
+                    except ValueError:
+                        continue
+                    conn.ptcp_recv += len(res.body)
+                    conn.rmid = res.lmid
+                    if len(res.body) == 0:
+                        continue
+                    conn.request_ptcp()  # ACK every non-empty packet (Empty body)
+                    body = res.body
+                code = body[0]
+                if code == 0x10:
+                    try:
+                        pl = PTCPPayload.parse(body).payload
+                    except ValueError:
+                        continue
+                    if _SERVE_DEBUG:
+                        print(f"D>C {len(pl)} {pl[:40]!r}", flush=True)
+                    try:
+                        socketclient.sendall(pl)
+                    except OSError:
+                        break
+                elif code == 0x12 and body[12:16] == b"DISC":
+                    print("Device closed realm (DISC)", flush=True)
+                    break
+                elif _SERVE_DEBUG:
+                    print(f"D>C ctrl 0x{code:02x}", flush=True)
+        finally:
+            stop.set()
+
+    def client_reader() -> None:
+        try:
+            while not stop.is_set():
+                rdy, _, _ = select.select([socketclient], [], [], 0.5)
+                if not rdy:
+                    continue
+                try:
+                    data = socketclient.recv(4096)
+                except OSError:
+                    break
+                if not data:
+                    print("Connection closed?", flush=True)
+                    break
+                if _SERVE_DEBUG:
+                    print(f"C>D {len(data)} {data[:40]!r}", flush=True)
+                with session_lock:
+                    try:
+                        conn.request_ptcp(bytes(PTCPPayload(realm_id, data)))
+                    except OSError:
+                        break
+        finally:
+            stop.set()
+
+    def heartbeat() -> None:
+        while not stop.wait(5.0):
+            with session_lock:
+                try:
+                    conn.request_ptcp(_HEARTBEAT_BODY)
+                except OSError:
+                    break
+
+    threads = [
+        threading.Thread(target=device_reader, daemon=True),
+        threading.Thread(target=client_reader, daemon=True),
+        threading.Thread(target=heartbeat, daemon=True),
+    ]
+    for t in threads:
+        t.start()
+    try:
+        while not stop.is_set():
+            stop.wait(0.25)
+    finally:
+        stop.set()
+        for t in threads:
+            if t is not threading.current_thread():
+                t.join(timeout=2.0)
+        print("Cleaning up connection", flush=True)
+        with session_lock:
+            try:
+                conn.request_ptcp(
+                    b"\x12\x00\x00\x00"
+                    + realm_id.to_bytes(4, "big")
+                    + b"\x00\x00\x00\x00"
+                    + b"DISC"
+                )
+                conn.request_ptcp()
+            except (OSError, ValueError):
+                pass
+        try:
+            socketclient.close()
+        except OSError:
+            pass
+        print("Connection closed", flush=True)
+
+
+def main(serial, dtype=0, username=None, password=None, debug=False, local_port=18554, quiet=True, relay_mode=False):
     env_salt = (os.environ.get("P2P_DEVICE_RANDSALT") or "").strip()
     set_device_randsalt(env_salt or None)
-    udp_kw = {"debug": debug, "quiet": quiet and not debug}
+    # P2P_PTCP_DEBUG=1 turns on the low-level PTCP packet trace WITHOUT the ffplay
+    # side-effect that the -d/--debug flag triggers (handy for diagnosing relay
+    # realm-open on a headless VPS).
+    ptcp_debug = (os.environ.get("P2P_PTCP_DEBUG") or "").strip().lower() in ("1", "true", "yes")
+    udp_kw = {"debug": debug or ptcp_debug, "quiet": quiet and not debug}
     socketserver = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     socketserver.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     socketserver.bind(("127.0.0.1", int(local_port)))
@@ -225,6 +451,20 @@ def main(serial, dtype=0, username=None, password=None, debug=False, local_port=
     main_remote.request_ptcp(b"\x00\x03\x01\x00")
     res = main_remote.read_ptcp()
 
+    if relay_mode:
+        # Easy4IP media-relay path (what DMSS falls back to when the camera is
+        # behind a NAT/CGNAT that blocks direct UDP). The relay agent already
+        # bridges this PTCP session to the camera, so we skip the device sign +
+        # STUN hole-punch entirely and stream RTSP straight over the agent.
+        _phase("P2P: relay media mode active (via Easy4IP agent — no direct UDP)")
+        _phase("Ready to connect")
+        print(
+            f"Test with: rtsp://127.0.0.1:{int(local_port)}/cam/realmonitor?channel=1&subtype=0",
+            flush=True,
+        )
+        _serve(main_remote, socketserver, local_port=local_port, debug=debug)
+        return
+
     main_remote.request_ptcp(b"\x17\x00\x00\x00" + b"\x00\x00\x00\x00\x00\x00\x00\x00")
     res = _read_ptcp_with_body(main_remote, label="PTCP sign from relay agent")
     sign = res.body[12:]
@@ -349,119 +589,7 @@ def main(serial, dtype=0, username=None, password=None, debug=False, local_port=
         f"Test with: rtsp://127.0.0.1:{int(local_port)}/cam/realmonitor?channel=1&subtype=0",
         flush=True,
     )
-    while True:
-        ready, _, _ = select.select([socketserver], [], [], 0.1)
-
-        if not ready:
-            ptcp_ready, _, _ = select.select([device_remote], [], [], 0)
-
-            if not ptcp_ready:
-                continue
-
-            # only simplex, duplex is not supported
-            res = device_remote.read_ptcp()
-            if len(res.body) == 0:
-                continue
-
-            assert res.body[0] == 0x13
-            device_remote.request_ptcp()
-
-            continue
-
-        socketclient, address = socketserver.accept()
-        print(f"Connection from {address}")
-
-        realm_id = random.randint(0x00000000, 0xFFFFFFFF)
-        device_remote.request_ptcp(
-            b"\x11\x00\x00\x00"
-            + realm_id.to_bytes(4, "big")
-            + b"\x00\x00\x00\x00"
-            # port 554
-            + b"\x00\x00\x02\x2A"
-            + b"\x7f\x00\x00\x01",
-        )
-        res = device_remote.read_ptcp()
-        if len(res.body) == 0:
-            res = device_remote.read_ptcp()
-        assert res.body[0] == 0x12
-
-        try:
-            while True:
-                ptcp_ready, _, _ = select.select([device_remote], [], [], 0.1)
-
-                # if ptcp_ready:
-                while ptcp_ready:
-                    res = device_remote.read_ptcp()
-
-                    if len(res.body) == 0:
-                        continue
-
-                    device_remote.request_ptcp()
-
-                    if res.body[0] != 0x10:
-                        continue
-
-                    body = PTCPPayload.parse(res.body)
-
-                    if debug:
-                        print()
-                        print(body)
-                        print(f"[{datetime.datetime.now().isoformat()}]")
-                        print("Data <<<")
-                        print(body.payload)
-                        print()
-
-                    socketclient.send(body.payload)
-
-                    ptcp_ready, _, _ = select.select([device_remote], [], [], 0.1)
-
-                client_ready, _, _ = select.select([socketclient], [], [], 0)
-
-                if not client_ready:
-                    continue
-
-                data = socketclient.recv(4096)
-
-                if not data:
-                    print("Connection closed?")
-                    break
-
-                if debug:
-                    print()
-                    print(f"[{datetime.datetime.now().isoformat()}]")
-                    print("Data >>>")
-                    print(data)
-                    print()
-
-                device_remote.request_ptcp(bytes(PTCPPayload(realm_id, data)))
-
-        # handle connection reset by peer
-        except ConnectionResetError:
-            print("Connection reset by peer")
-        except BrokenPipeError:
-            print("Broken pipe")
-        finally:
-            print("Cleaning up connection")
-            device_remote.request_ptcp(
-                b"\x12\x00\x00\x00"
-                + realm_id.to_bytes(4, "big")
-                + b"\x00\x00\x00\x00"
-                + b"DISC"
-            )
-
-            res = device_remote.read_ptcp()
-
-            while len(res.body) == 0 or res.body[0] == 0x10:
-                if len(res.body) > 0:
-                    device_remote.request_ptcp()
-
-                res = device_remote.read_ptcp()
-
-            assert res.body[0] == 0x12
-            device_remote.request_ptcp()
-
-            socketclient.close()
-            print("Connection closed")
+    _serve(device_remote, socketserver, local_port=local_port, debug=debug)
 
 
 if __name__ == "__main__":
@@ -484,7 +612,17 @@ if __name__ == "__main__":
         default=True,
         help="Suppress P2P protocol debug output (default: on)",
     )
+    parser.add_argument(
+        "--relay",
+        action="store_true",
+        default=False,
+        help="Stream via Dahua's Easy4IP media relay (for cameras behind NAT/CGNAT "
+        "where direct UDP hole-punch fails). Same path DMSS uses as a fallback.",
+    )
     args = parser.parse_args()
+
+    if os.environ.get("P2P_RELAY_MODE", "").strip().lower() in ("1", "true", "yes"):
+        args.relay = True
 
     if args.username is None or args.password is None:
         if args.type > 0:
@@ -501,4 +639,5 @@ if __name__ == "__main__":
             args.debug,
             local_port=args.local_port,
             quiet=args.quiet,
+            relay_mode=args.relay,
         )

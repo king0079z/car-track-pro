@@ -10,6 +10,8 @@ vi.mock('../contexts/AuthContext', () => ({
 
 const mockUseAuth = vi.mocked(useAuth)
 
+import type { User, PageKey } from '../types'
+
 const baseUser = {
   id: 1,
   full_name: 'Test',
@@ -17,7 +19,8 @@ const baseUser = {
   username: 't',
   is_active: true,
   created_at: '2024-01-01T00:00:00',
-}
+  allowed_pages: ['dashboard', 'visits', 'vehicles', 'users', 'audit'] as PageKey[],
+};
 
 beforeEach(() => {
   vi.clearAllMocks()
@@ -103,7 +106,7 @@ describe('ProtectedRoute', () => {
   it('redirects staff away from adminOnly to home', () => {
     mockUseAuth.mockReturnValue({
       isAuthenticated: true,
-      user: { ...baseUser, role: 'staff' },
+      user: { ...baseUser, role: 'staff', allowed_pages: ['visits'] },
       token: 't',
       isLoading: false,
       login: vi.fn(),
@@ -122,11 +125,12 @@ describe('ProtectedRoute', () => {
             }
           />
           <Route path="/" element={<div data-testid="home">Home</div>} />
+          <Route path="/visits" element={<div data-testid="visits">Visits</div>} />
         </Routes>
       </MemoryRouter>,
     )
     expect(screen.queryByText('Secret')).not.toBeInTheDocument()
-    expect(screen.getByTestId('home')).toBeInTheDocument()
+    expect(screen.getByTestId('visits')).toBeInTheDocument()
   })
 
   it('redirects manager away from adminRoleOnly', () => {

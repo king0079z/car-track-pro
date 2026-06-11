@@ -1419,10 +1419,18 @@ def _run_live_tracking_loop(
     health_pulse: Callable[[], None] | None,
     on_prune: Callable[[Any], None] | None,
     prune_every: int,
+    on_detections: Callable[[float, int], None] | None = None,
+    interrupt_check: Callable[[], str | None] | None = None,
+    loop_ctl: dict[str, Any] | None = None,
 ) -> tuple[int, list[dict[str, Any]]]:
     """
     Live camera loop: a reader thread keeps preview fresh while AI runs on strided frames.
     Prevents the feed freezing when YOLO/OCR is slow on CPU.
+
+    ``on_detections(max_width_frac, count)`` reports plate boxes per processed
+    frame to the stream governor. ``interrupt_check()`` may return a reason
+    ("tier" / "idle") to break the loop early; the reason is published in
+    ``loop_ctl["break_reason"]`` so the outer reconnect loop can act on it.
     """
     frame_slot: dict[str, Any] = {"frame": None, "seq": 0}
     slot_lock = threading.Lock()
@@ -1492,11 +1500,27 @@ def _run_live_tracking_loop(
     except Exception:
         stall_timeout = 25.0
     speed_err_count = 0
+    interrupt_gate = time.monotonic()
 
     try:
         while True:
             if stop_event is not None and stop_event.is_set():
                 break
+
+            # Stream-governor interrupts (SD<->HD switch, idle/power-save):
+            # checked on a coarse cadence — both actions reconnect the stream.
+            if interrupt_check is not None:
+                now_chk = time.monotonic()
+                if now_chk - interrupt_gate >= 2.0:
+                    interrupt_gate = now_chk
+                    try:
+                        reason = interrupt_check()
+                    except Exception:
+                        reason = None
+                    if reason:
+                        if loop_ctl is not None:
+                            loop_ctl["break_reason"] = reason
+                        break
             # Reader exits on repeated read failures, end-of-stream, or an error.
             # Break so the outer reconnect loop re-opens the capture; never keep
             # processing a stale frame behind a dead reader.
@@ -1553,6 +1577,19 @@ def _run_live_tracking_loop(
                 if _sema is not None:
                     _sema.release()
             processed += 1
+
+            if on_detections is not None:
+                try:
+                    boxes = speed_obj.boxes
+                    n_boxes = len(boxes) if boxes is not None else 0
+                    max_wf = 0.0
+                    if n_boxes:
+                        for b in boxes:
+                            x1, _, x2, _ = map(float, b[:4])
+                            max_wf = max(max_wf, (x2 - x1) / float(max(1, target_w)))
+                    on_detections(max_wf, n_boxes)
+                except Exception:
+                    pass
 
             if health_pulse is not None:
                 try:
@@ -1635,6 +1672,9 @@ def _run_tracking_loop(
     live_read_fail_max: int | None = None,
     health_pulse: Callable[[], None] | None = None,
     on_prune: Callable[[Any], None] | None = None,
+    on_detections: Callable[[float, int], None] | None = None,
+    interrupt_check: Callable[[], str | None] | None = None,
+    loop_ctl: dict[str, Any] | None = None,
 ) -> tuple[int, list[dict[str, Any]]]:
     """Shared frame loop for file-based and live camera / stream analysis."""
     count = 0
@@ -1670,6 +1710,9 @@ def _run_tracking_loop(
             health_pulse=health_pulse,
             on_prune=on_prune,
             prune_every=prune_every,
+            on_detections=on_detections,
+            interrupt_check=interrupt_check,
+            loop_ctl=loop_ctl,
         )
 
     try:
@@ -1956,7 +1999,17 @@ def analyze_live_stream(
         or low_src.startswith("rtsp")
         or is_dahua_alias(source)
     )
-    reconnect_delay = float(settings.LIVE_RECONNECT_BASE_SEC)
+    # Easy4IP relay / RTSP-tunnel sources need a gentler reconnect cadence: each
+    # RTSP open consumes the camera's single cloud relay slot, and hammering it
+    # degrades the relay. Start the backoff higher so failed opens space out and
+    # let the device recover (LAN/USB sources keep the snappy default).
+    _relay_like = is_dahua_alias(source) or low_src.startswith("rtsp")
+    _reconnect_base = (
+        max(8.0, float(settings.LIVE_RECONNECT_BASE_SEC))
+        if _relay_like
+        else float(settings.LIVE_RECONNECT_BASE_SEC)
+    )
+    reconnect_delay = _reconnect_base
     reconnect_count = 0
     session_started = time.monotonic()
     processed_total = 0
@@ -1987,7 +2040,15 @@ def analyze_live_stream(
     w0, h0, vfps = 1280, 720, 30.0
     camera_ok = True
 
-    if not use_warmup_handoff:
+    # Easy4IP relay / RTSP-tunnel sources degrade under session churn (every RTSP
+    # open consumes the camera's single cloud relay slot). A throw-away probe just
+    # to read the frame size would DOUBLE the sessions created at startup and can
+    # wedge the relay, so skip it: open the real capture once (below) and derive
+    # the geometry from its first frame instead. Frames are resized to the work
+    # size regardless of the source resolution, so defaults are safe meanwhile.
+    skip_probe = is_dahua_alias(source) or low_src.startswith("rtsp")
+
+    if not use_warmup_handoff and not skip_probe:
         probe = open_capture_for_live(source)
         camera_ok = probe.isOpened()
         if camera_ok:
@@ -2001,6 +2062,8 @@ def analyze_live_stream(
                 "Could not open the PC/laptop camera. Close Zoom/Teams/Camera app, "
                 "allow Windows camera permission for Python, then try again (or use index 1)."
             )
+    elif skip_probe and args.fps and args.fps > 0:
+        vfps = float(args.fps)
 
     if vfps < 1.0 or vfps > 240.0:
         vfps = 30.0
@@ -2168,7 +2231,13 @@ def analyze_live_stream(
 
     health_state: dict[str, Any] = {"last_frame_at": None}
 
-    def _push_health(*, connected: bool, message: str = "", frame_ok: bool = False) -> None:
+    from . import stream_governor
+
+    gv_key = source  # already normalized — same key the resolver registers
+
+    def _push_health(
+        *, connected: bool, message: str = "", frame_ok: bool = False, idle: bool = False
+    ) -> None:
         if frame_ok:
             health_state["last_frame_at"] = datetime.now(UTC).isoformat()
         if health_callback is None:
@@ -2181,7 +2250,109 @@ def analyze_live_stream(
             "segments": list(segment_names),
             "message": message,
             "last_frame_at": health_state["last_frame_at"],
+            "idle": idle,
+            "stream_tier": (
+                stream_governor.active_tier(gv_key)
+                if stream_governor.is_adaptive(gv_key)
+                else None
+            ),
         })
+
+    def _on_detections(max_width_frac: float, count: int) -> None:
+        stream_governor.note_detection(gv_key, max_width_frac=max_width_frac, count=count)
+
+    def _interrupt_check() -> str | None:
+        """Governor-driven loop interrupts: SD<->HD switch or idle power-save."""
+        if not stream_governor.is_adaptive(gv_key):
+            return None
+        if stream_governor.wants_tier_switch(gv_key):
+            return "tier"
+        if stream_governor.should_idle(gv_key):
+            return "idle"
+        return None
+
+    def _idle_watch() -> str:
+        """Power save: the cloud stream is released; sample a single frame on an
+        adaptive interval (cached HLS URL — no API calls) and run detection on
+        it. Wakes on a vehicle, a viewer opening the camera wall, or stop.
+        Returns the wake reason: "vehicle" | "viewer" | "stop"."""
+        stream_governor.set_idle(gv_key, True)
+        base = max(5.0, float(getattr(settings, "LIVE_IDLE_SAMPLE_BASE_SEC", 30.0)))
+        interval_max = max(base, float(getattr(settings, "LIVE_IDLE_SAMPLE_MAX_SEC", 300.0)))
+        interval = base
+        try:
+            while not stop_event.is_set():
+                _push_health(
+                    connected=False,
+                    idle=True,
+                    message=f"Power save — vehicle check every {interval:.0f}s",
+                )
+                _notify_phase(
+                    phase_callback,
+                    f"Power save — next vehicle check in {interval:.0f}s…",
+                )
+                # Sleep in short slices so a viewer wakes the stream instantly.
+                deadline = time.monotonic() + interval
+                while time.monotonic() < deadline:
+                    if stop_event.wait(1.0):
+                        return "stop"
+                    if stream_governor.has_recent_viewer(gv_key):
+                        return "viewer"
+
+                frame = None
+                try:
+                    scap = open_capture_for_live(source)
+                    try:
+                        if scap.isOpened():
+                            s_deadline = time.monotonic() + 12.0
+                            while time.monotonic() < s_deadline and not stop_event.is_set():
+                                ok, f = scap.read()
+                                if ok and f is not None:
+                                    frame = f
+                                    break
+                                time.sleep(0.1)
+                    finally:
+                        scap.release()
+                except Exception:
+                    frame = None
+                if stop_event.is_set():
+                    return "stop"
+
+                if frame is not None:
+                    try:
+                        work = cv2.resize(frame, (target_w, new_h))
+                        _sema = _get_inference_semaphore()
+                        if _sema is not None:
+                            _sema.acquire()
+                        try:
+                            result = speed_obj.estimate_speed(work)
+                        finally:
+                            if _sema is not None:
+                                _sema.release()
+                        # Keep the camera-wall tile fresh even while idle.
+                        if preview_jpeg_callback is not None:
+                            ok, buf = cv2.imencode(
+                                ".jpg", result, [int(cv2.IMWRITE_JPEG_QUALITY), 70]
+                            )
+                            if ok:
+                                preview_jpeg_callback(buf.tobytes())
+                        boxes = speed_obj.boxes
+                        n_boxes = len(boxes) if boxes is not None else 0
+                        if n_boxes:
+                            max_wf = 0.0
+                            for b in boxes:
+                                x1, _, x2, _ = map(float, b[:4])
+                                max_wf = max(max_wf, (x2 - x1) / float(max(1, target_w)))
+                            stream_governor.note_detection(
+                                gv_key, max_width_frac=max_wf, count=n_boxes
+                            )
+                            return "vehicle"
+                    except Exception:
+                        pass
+                interval = min(interval_max, interval * 1.5)
+        finally:
+            stream_governor.set_idle(gv_key, False)
+        return "stop"
 
     def _writer_for_loop():
         if segment_writer is not None:
@@ -2234,11 +2405,12 @@ def analyze_live_stream(
             )
             continue
 
-        reconnect_delay = float(settings.LIVE_RECONNECT_BASE_SEC)
+        reconnect_delay = _reconnect_base
         start_msg = recording_note or "Live analysis running…"
         _notify_phase(phase_callback, start_msg)
         _push_health(connected=True, message="Stream connected")
 
+        loop_ctl: dict[str, Any] = {}
         processed, manifest_out = _run_tracking_loop(
             cap,
             speed_obj,
@@ -2259,6 +2431,9 @@ def analyze_live_stream(
             live_mode=True,
             health_pulse=_health_pulse,
             on_prune=_on_prune,
+            on_detections=_on_detections,
+            interrupt_check=_interrupt_check,
+            loop_ctl=loop_ctl,
         )
         cap.release()
         processed_total += processed
@@ -2267,6 +2442,30 @@ def analyze_live_stream(
 
         if stop_event.is_set():
             break
+
+        break_reason = loop_ctl.get("break_reason")
+        if break_reason == "tier":
+            # Hybrid SD/HD: reconnect immediately — the resolver hands back the
+            # governor-preferred tier's (cached or freshly bound) HLS URL.
+            want = stream_governor.preferred_tier(gv_key).upper()
+            _notify_phase(phase_callback, f"Switching stream quality → {want}…")
+            _push_health(connected=False, message=f"Switching to {want} stream…")
+            reconnect_delay = _reconnect_base
+            continue
+        if break_reason == "idle":
+            wake = _idle_watch()
+            if wake == "stop" or stop_event.is_set():
+                break
+            stream_governor.note_activity(gv_key)
+            _notify_phase(
+                phase_callback,
+                "Vehicle detected — resuming live stream…"
+                if wake == "vehicle"
+                else "Viewer connected — resuming live stream…",
+            )
+            reconnect_delay = _reconnect_base
+            continue
+
         if not reconnect:
             break
 

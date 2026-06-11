@@ -33,6 +33,8 @@ interface LiveHealth {
   reconnect_count?: number;
   uptime_sec?: number;
   processed_frames?: number;
+  idle?: boolean;
+  stream_tier?: 'sd' | 'hd' | null;
   segments?: string[];
   message?: string;
   last_frame_at?: string | null;
@@ -65,6 +67,8 @@ interface SyncedDetection {
 
 interface PlateAction {
   plate: string;
+  jobId?: string;
+  panelLabel?: string;
   detectionId: number | null;
   vehicle: SyncedDetection['vehicle'] | null;
   linkedVisitId: number | null;
@@ -140,7 +144,10 @@ const PlateActionCard: React.FC<{
     if (pa.detectionId) params.set('detection_id', String(pa.detectionId));
     if (extra?.owner_name) params.set('owner_name', extra.owner_name);
     if (extra?.owner_phone) params.set('owner_phone', extra.owner_phone);
-    if (extra?.assigned_bay != null) params.set('bay', String(extra.assigned_bay));
+    const panelBay = pa.panelLabel?.match(/bay[\s_\-]*#?\s*(\d{1,2})/i)?.[1]
+      ?? pa.panelLabel?.match(/panel[\s_\-]*#?\s*(\d{1,2})/i)?.[1];
+    const autoBay = extra?.assigned_bay ?? (panelBay ? parseInt(panelBay, 10) : undefined);
+    if (autoBay != null) params.set('bay', String(autoBay));
     navigate(`/visits/new?${params.toString()}`);
   };
 
@@ -175,7 +182,7 @@ const PlateActionCard: React.FC<{
       {/* Found: show vehicle card */}
       {pa.state === 'found' && pa.vehicle && (
         <div style={{ background: 'var(--bg-surface)', borderRadius: 10, padding: '10px 14px', border: '1px solid var(--border-light)' }}>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px 16px', fontSize: 12, marginBottom: 10 }}>
+          <div className="rcols-2" style={{ display: 'grid', gap: '6px 16px', fontSize: 12, marginBottom: 10 }}>
             <span style={{ color: 'var(--text-muted)' }}>Owner</span>
             <span style={{ color: 'var(--text-primary)', fontWeight: 600 }}>{pa.vehicle.owner_name || '—'}</span>
             <span style={{ color: 'var(--text-muted)' }}>Phone</span>
@@ -208,7 +215,7 @@ const PlateActionCard: React.FC<{
           <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
             This plate isn't in CarTrack yet. Fill in owner details to register and open a visit:
           </div>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 80px', gap: 8 }}>
+          <div className="rcols-2-80" style={{ display: 'grid', gap: 8 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, background: 'var(--bg-surface)', border: '1px solid var(--border-light)', borderRadius: 8, padding: '6px 10px' }}>
               <User size={12} color="var(--text-muted)" />
               <input value={ownerName} onChange={e => setOwnerName(e.target.value)} placeholder="Owner name" style={{ background: 'none', border: 'none', outline: 'none', fontSize: 12, color: 'var(--text-primary)', width: '100%' }} />
@@ -499,7 +506,7 @@ export const VisionFlowStudio: React.FC = () => {
       const { job_id } = await res.json();
       setJobId(job_id); startPreview(job_id); startLivePoll(job_id, false);
       pollJob(job_id).catch(() => {});
-      pollRef.current = setInterval(() => pollJob(job_id).catch(() => { stopPoll(); stopPreview(); stopLivePoll(); toast$('Lost connection.'); }), 520);
+      pollRef.current = setInterval(() => pollJob(job_id).catch(() => { stopPoll(); stopPreview(); stopLivePoll(); toast$('Lost connection.'); }), 1500);
     } catch {
       setJob(prev => prev ? { ...prev, status: 'error', message: 'Network error' } : null);
       toast$('Network error — is the server running?');
@@ -550,7 +557,7 @@ export const VisionFlowStudio: React.FC = () => {
       const { job_id } = await res.json() as { job_id: string };
       setJobId(job_id); startPreview(job_id); startLivePoll(job_id, true);
       pollJob(job_id).catch(() => {});
-      pollRef.current = setInterval(() => pollJob(job_id).catch(() => { stopPoll(); stopPreview(); stopLivePoll(); toast$('Lost connection.'); }), 520);
+      pollRef.current = setInterval(() => pollJob(job_id).catch(() => { stopPoll(); stopPreview(); stopLivePoll(); toast$('Lost connection.'); }), 1500);
     } catch {
       setJob(prev => prev ? { ...prev, status: 'error', message: 'Network error', progress: 0 } : null);
       toast$('Network error — is the server running?');
@@ -650,7 +657,7 @@ export const VisionFlowStudio: React.FC = () => {
               </p>
             </div>
           </div>
-          <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
+          <div className="vf-hero-actions page-hero-actions" style={{ flexShrink: 0 }}>
             <Link to="/visionflow/multicam" className="btn btn-secondary" style={{ textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13 }}>
               <Grid2X2 size={14} /> Camera wall
             </Link>
@@ -792,7 +799,7 @@ export const VisionFlowStudio: React.FC = () => {
             <div style={{ flex: 1, minWidth: 0 }}>
               <h2 style={{ fontSize: 17, fontWeight: 700, color: 'var(--text-primary)', margin: '0 0 6px', letterSpacing: '-0.2px' }}>Live camera or stream</h2>
               <p style={{ fontSize: 13, color: 'var(--text-secondary)', margin: 0, lineHeight: 1.6, maxWidth: 640 }}>
-                Uses the camera on the machine running the <strong>backend</strong>. Leave source empty or enter <code style={{ fontSize: 12 }}>0</code> for the built-in laptop/PC webcam. For the <strong>Dahua Hero A1</strong>, configure it below (Wi-Fi RTSP — USB-C is power only) and use source <code style={{ fontSize: 12 }}>dahua-hero-a1</code>. Enable <strong>24/7 mode</strong> for auto-reconnect.
+                Uses the camera on the machine running the <strong>backend</strong>. Leave source empty or enter <code style={{ fontSize: 12 }}>0</code> for the built-in laptop/PC webcam. For the <strong>Dahua Hero A1</strong>, configure it below (connects via <strong>Cloud / Easy4IP P2P</strong> — no LAN needed; USB-C is power only) and use source <code style={{ fontSize: 12 }}>dahua-hero-a1</code>. Enable <strong>24/7 mode</strong> for auto-reconnect.
               </p>
             </div>
           </div>
@@ -912,13 +919,13 @@ export const VisionFlowStudio: React.FC = () => {
           )}
 
           {/* Registry + preview */}
-          <div style={{ display: 'grid', gridTemplateColumns: showPreviewPanel ? '1fr 1fr' : '1fr', gap: 16, minHeight: 280 }}>
+          <div className={`vf-job-split${showPreviewPanel ? ' has-preview' : ''}`}>
             <div style={{ borderRadius: 14, overflow: 'hidden', border: '1px solid var(--border-light)', background: 'var(--bg-surface)', display: 'flex', flexDirection: 'column' }}>
               <div style={{ padding: '10px 16px', borderBottom: '1px solid var(--border-light)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0 }}>
                 <span style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.07em', color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: 6 }}><Eye size={12} /> Vehicle registry</span>
                 {vehicleCount > 0 && <span style={{ fontSize: 10.5, color: 'var(--text-muted)', padding: '2px 8px', borderRadius: 99, background: 'var(--bg-elevated)', border: '1px solid var(--border-light)' }}>{vehicleCount} track{vehicleCount !== 1 ? 's' : ''}</span>}
               </div>
-              <div style={{ overflowY: 'auto', maxHeight: 320, flex: 1 }}>
+              <div className="table-scroll" style={{ overflowY: 'auto', maxHeight: 320, flex: 1 }}>
                 <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
                   <thead>
                     <tr style={{ background: 'var(--bg-elevated)' }}>

@@ -30,16 +30,16 @@ export const Modal: React.FC<ModalProps> = ({ isOpen, onClose, title, children, 
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4" onClick={onClose}>
       <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" />
       <div
-        className={`relative bg-gray-900 border border-gray-800 rounded-2xl shadow-2xl w-full ${sizeClasses[size]} animate-slide-up`}
+        className={`relative flex flex-col max-h-[90vh] bg-gray-900 border border-gray-800 rounded-2xl shadow-2xl w-full ${sizeClasses[size]} animate-slide-up`}
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-center justify-between p-6 border-b border-gray-800">
-          <h2 className="text-lg font-semibold text-white">{title}</h2>
+        <div className="flex items-center justify-between p-4 sm:p-6 border-b border-gray-800 shrink-0">
+          <h2 className="text-base sm:text-lg font-semibold text-white">{title}</h2>
           <button onClick={onClose} className="text-gray-400 hover:text-white transition-colors p-1">
             <X className="w-5 h-5" />
           </button>
         </div>
-        <div className="p-6">{children}</div>
+        <div className="p-4 sm:p-6 overflow-y-auto">{children}</div>
       </div>
     </div>
   );

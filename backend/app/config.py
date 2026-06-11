@@ -133,13 +133,53 @@ class Settings(BaseSettings):
     DAHUA_DEVICE_SERIAL: str = ""  # SN from device QR, e.g. BF0E4C7GAGB833C
     DAHUA_PASSWORD: str = ""  # device password from DMSS (not DMSS email login)
     DAHUA_USERNAME: str = "admin"
-    DAHUA_CONNECTION_MODE: str = "p2p"  # p2p | auto | lan | cartrack_relay
+    DAHUA_CONNECTION_MODE: str = "p2p"  # p2p | auto | lan | cartrack_relay | cloud_hls
     DAHUA_DEVICE_TYPE: str = ""  # optional, e.g. DH-H3A
     DAHUA_HOST: str = ""  # optional LAN IP for auto mode fallback
     DAHUA_STREAM: str = "sub"  # sub | main
     DAHUA_P2P_LOCAL_PORT: int = 18554
     # When serial+password env vars are set, auto-start Easy4IP tunnel on API boot
     DAHUA_P2P_PREWARM_ON_STARTUP: bool = True
+
+    # Imou / Easy4IP Open Platform — cloud HLS path (DMSS-grade, pure cloud, no
+    # on-site PC). Register a free app at open.imoulife.com; data center decides
+    # the base URL (sg=East Asia, fk=Central Europe, or=Western America).
+    IMOU_APP_ID: str = ""
+    IMOU_APP_SECRET: str = ""
+    IMOU_BASE_URL: str = "https://openapi-sg.easy4ip.com"
+    IMOU_CHANNEL: str = "0"
+    IMOU_PREFER_HD: bool = True  # HD main stream (best plate legibility)
+
+    # ── Adaptive cloud streaming (Imou quota saver) ──────────────────────────
+    # Master switch for all cloud-quota protections below. The Imou Open
+    # Platform bills interface requests + media flow (GB); these settings keep
+    # 24/7 ANPR inside the free tier without sacrificing plate reads.
+    STREAM_SAVER_ENABLED: bool = True
+    # Cache resolved HLS URLs so stream reconnects do NOT re-hit the cloud API
+    # (bindDeviceLive + getLiveStreamInfo) every time. Invalidated automatically
+    # when a cached URL fails to open.
+    IMOU_HLS_CACHE_TTL_SEC: float = 600.0
+    # When the cloud cannot resolve a stream (camera offline / unplugged), back
+    # off exponentially instead of hammering the API on every reconnect.
+    IMOU_FAIL_BACKOFF_BASE_SEC: float = 30.0
+    IMOU_FAIL_BACKOFF_MAX_SEC: float = 600.0
+    # Hybrid SD/HD: idle on the SD sub-stream (~4-8x less media flow), escalate
+    # to the HD main stream while a plate is in frame, drop back after the hold.
+    STREAM_HYBRID_ENABLED: bool = True
+    # Plate box width (fraction of frame width) needed to request HD. 0.0 =
+    # any plate detection escalates; raise (e.g. 0.05) to escalate only when
+    # the vehicle is close.
+    STREAM_HD_ESCALATE_WIDTH_FRAC: float = 0.0
+    STREAM_HD_HOLD_SEC: float = 90.0  # stay on HD this long after the last detection
+    STREAM_TIER_MIN_DWELL_SEC: float = 45.0  # min seconds between SD<->HD switches (anti-flap)
+    # Idle / wake (power save): with no detections and no viewer, release the
+    # cloud stream and sample one frame on an adaptive interval. A detection in
+    # a sample (or someone opening the camera wall) wakes the stream instantly.
+    LIVE_IDLE_ENABLED: bool = True
+    LIVE_IDLE_AFTER_SEC: float = 240.0  # no plates this long → enter power save
+    LIVE_IDLE_SAMPLE_BASE_SEC: float = 30.0  # first sampling interval while idle
+    LIVE_IDLE_SAMPLE_MAX_SEC: float = 300.0  # sampling interval ceiling (deep idle)
+    LIVE_VIEWER_HOLD_SEC: float = 45.0  # recent preview fetch keeps the stream awake this long
 
     @property
     def cors_origins(self) -> List[str]:

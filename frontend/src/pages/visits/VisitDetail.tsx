@@ -24,27 +24,6 @@ import {
 import toast from 'react-hot-toast';
 import type { Visit, ServiceItem, Service } from '../../types';
 
-const thStyle: React.CSSProperties = {
-  padding: '10px 14px',
-  fontSize: 10,
-  fontWeight: 800,
-  textTransform: 'uppercase',
-  letterSpacing: '0.07em',
-  color: 'var(--text-muted)',
-  textAlign: 'left',
-  whiteSpace: 'nowrap',
-  borderBottom: '1px solid var(--border-light)',
-  background: 'var(--bg-elevated)',
-};
-
-const tdStyle: React.CSSProperties = {
-  padding: '12px 14px',
-  fontSize: 13,
-  color: 'var(--text-secondary)',
-  borderBottom: '1px solid var(--border-light)',
-  verticalAlign: 'middle',
-};
-
 const STATUS_CFG: Record<string, { label: string }> = {
   waiting:    { label: 'Waiting' },
   in_service: { label: 'In Service' },
@@ -141,6 +120,7 @@ export const VisitDetail: React.FC = () => {
   const [staffAssign, setStaffAssign] = useState<Record<number, number>>({});
   const [showStatusModal, setShowStatusModal] = useState(false);
   const [showAddService, setShowAddService] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
   const [addServiceId, setAddServiceId] = useState<number | ''>('');
   const [analyticsRange, setAnalyticsRange] = useState<AnalyticsRange>('month');
 
@@ -341,6 +321,10 @@ export const VisitDetail: React.FC = () => {
 
   const printPlateImg = resolveMediaUrl(visit.plate_image_url);
   const printCamImg = resolveMediaUrl(visit.entry_camera_snapshot);
+  const payStyle = paymentStyle(visit.payment_status);
+  const durationLabel = visit.duration_minutes
+    ? fmtDur(visit.duration_minutes)
+    : (isActive ? `${fmtDur(liveMinutes)} ⟳` : '—');
 
   return (
     <>
@@ -359,22 +343,15 @@ export const VisitDetail: React.FC = () => {
         .visit-detail-print-only { display: none; }
       `}</style>
 
-    <div className="visit-detail-no-print animate-fade-in">
-      <div style={{
-        display: 'flex', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between',
-        gap: 12, marginBottom: 16, paddingBottom: 14, borderBottom: '1px solid var(--border-light)',
-      }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-          <button className="btn btn-ghost btn-sm" onClick={() => navigate('/visits')} style={{ padding: '4px 10px' }}>
-            <ArrowLeft size={14} /> Visits
-          </button>
-          <span style={{ color: 'var(--border)', fontSize: 12 }}>|</span>
-          <span style={{ fontFamily: 'ui-monospace, monospace', fontSize: 11, color: 'var(--text-muted)', fontWeight: 700 }}>
-            {visit.visit_number}
-          </span>
-        </div>
-        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-          <button className="btn btn-ghost btn-sm" onClick={() => window.print()} title="Print work order report">
+    <div className="visit-detail-no-print vd-page animate-fade-in">
+      {/* Top bar */}
+      <div className="vd-toolbar">
+        <button className="btn btn-ghost btn-sm" onClick={() => navigate('/visits')}>
+          <ArrowLeft size={14} /> Visits
+        </button>
+        <span className="vd-toolbar-id">{visit.visit_number}</span>
+        <div className="vd-toolbar-actions">
+          <button className="btn btn-ghost btn-sm" onClick={() => window.print()} title="Print work order">
             <Printer size={13} /> Print
           </button>
           {isActive && (
@@ -382,14 +359,8 @@ export const VisitDetail: React.FC = () => {
               <button className="btn btn-secondary btn-sm" onClick={() => setShowStatusModal(true)}>
                 <Edit size={13} /> Status
               </button>
-              <button
-                className="btn btn-success btn-sm"
-                onClick={() => checkoutMutation.mutate()}
-                disabled={checkoutMutation.isPending}
-              >
-                {checkoutMutation.isPending
-                  ? <div className="spinner" style={{ width: 13, height: 13 }} />
-                  : <LogOut size={14} />}
+              <button className="btn btn-success btn-sm" onClick={() => checkoutMutation.mutate()} disabled={checkoutMutation.isPending}>
+                {checkoutMutation.isPending ? <div className="spinner" style={{ width: 13, height: 13 }} /> : <LogOut size={14} />}
                 Checkout
               </button>
             </>
@@ -397,433 +368,211 @@ export const VisitDetail: React.FC = () => {
         </div>
       </div>
 
-      {/* Header card */}
-      <div className="card" style={{ padding: '18px 20px', marginBottom: 14, border: '1px solid var(--border-light)' }}>
-        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
-          <div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6, flexWrap: 'wrap' }}>
-              <span style={{ fontFamily: 'ui-monospace, monospace', fontSize: 22, fontWeight: 900, color: 'var(--text-accent)', letterSpacing: '0.08em' }}>
-                {visit.vehicle?.plate_number}
-              </span>
-              <span className={`status-pill status-${visit.status}`} style={{ fontSize: 11 }}>
-                {visit.status === 'in_service' && (
-                  <span style={{ width: 5, height: 5, borderRadius: '50%', background: 'currentColor', animation: 'pulse 1.5s infinite' }} />
-                )}
-                {cfg.label}
-              </span>
+      {/* Hero — everything at a glance */}
+      <section className="vd-hero">
+        <div className="vd-hero-top">
+          <div className="vd-hero-main">
+            <div className="vd-plate-row">
+              <span className="vd-plate">{visit.vehicle?.plate_number}</span>
+              <span className={`status-pill status-${visit.status}`}>{cfg.label}</span>
+              {visit.assigned_bay != null && (
+                <span className="vd-bay-pill">Bay {visit.assigned_bay}</span>
+              )}
             </div>
-            <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--text-primary)', marginBottom: 4 }}>
-              {visit.vehicle?.make ? `${visit.vehicle.make} ${visit.vehicle.model || ''}` : 'Unknown vehicle'}
-              {visit.vehicle?.year && <span style={{ fontSize: 12, color: 'var(--text-muted)', marginLeft: 8 }}>{visit.vehicle.year}</span>}
-            </div>
-            <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', fontSize: 12, color: 'var(--text-secondary)' }}>
-              <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                <Calendar size={11} /> {fmtQatar(visit.entry_time, 'full')}
-              </span>
-              {visit.customer_name && (
-                <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                  <User size={11} /> {visit.customer_name}
-                </span>
-              )}
-              {visit.assigned_bay && (
-                <span className="badge badge-blue" style={{ fontSize: 10 }}>Bay {visit.assigned_bay}</span>
-              )}
-              {visit.created_by_user && (
-                <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                  <Camera size={11} /> {visit.created_by_user.full_name}
-                </span>
-              )}
+            <h1 className="vd-vehicle-title">
+              {visit.vehicle?.make ? `${visit.vehicle.make} ${visit.vehicle.model || ''}`.trim() : 'Unknown vehicle'}
+              {visit.vehicle?.year && <span className="vd-year">{visit.vehicle.year}</span>}
+            </h1>
+            <div className="vd-meta-row">
+              <span><Calendar size={12} /> {fmtQatar(visit.entry_time, 'full')}</span>
+              {visit.customer_name && <span><User size={12} /> {visit.customer_name}</span>}
+              {visit.customer_phone && <span><Phone size={12} /> {visit.customer_phone}</span>}
+              {visit.created_by_user && <span><Camera size={12} /> Opened by {visit.created_by_user.full_name}</span>}
+              {visit.anpr_camera_name && <span><ScanLine size={12} /> {visit.anpr_camera_name}</span>}
             </div>
           </div>
-          <Link to={`/vehicles/${visit.vehicle_id}`} className="btn btn-secondary btn-sm" style={{ textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+          <Link to={`/vehicles/${visit.vehicle_id}`} className="btn btn-secondary btn-sm vd-profile-link">
             <Car size={13} /> Vehicle profile
           </Link>
         </div>
-      </div>
-
-      {/* Stats row */}
-      <div style={{
-        display: 'grid',
-        gridTemplateColumns: 'repeat(auto-fill, minmax(148px, 1fr))',
-        gap: 8,
-        marginBottom: 14,
-      }}>
-        {[
-          {
-            label: 'Duration', icon: Clock, color: 'var(--text-warning)', bg: 'rgba(252,211,77,0.12)',
-            value: visit.duration_minutes ? fmtDur(visit.duration_minutes) : (isActive ? fmtDur(liveMinutes) + ' ⟳' : '—'),
-          },
-          {
-            label: 'Total', icon: DollarSign, color: 'var(--text-purple)', bg: 'rgba(196,181,253,0.12)',
-            value: `QAR ${(visit.total_price || 0).toLocaleString()}`,
-          },
-          {
-            label: 'Services', icon: Wrench, color: 'var(--text-accent)', bg: 'rgba(59,130,246,0.12)',
-            value: visit.service_items?.length ?? 0,
-          },
-          {
-            label: 'Payment', icon: CheckCircle,
-            color: visit.payment_status === 'paid' ? 'var(--text-success)' : 'var(--text-warning)',
-            bg: visit.payment_status === 'paid' ? 'rgba(110,231,183,0.12)' : 'rgba(252,211,77,0.12)',
-            value: paymentLabel(visit.payment_status),
-          },
-        ].map(({ label, icon: Icon, color, bg, value }) => (
-          <div
-            key={label}
-            style={{
-              background: 'var(--bg-elevated)', border: '1px solid var(--border-light)',
-              borderRadius: 10, padding: '10px 12px', display: 'flex', gap: 10, alignItems: 'flex-start',
-            }}
-          >
-            <div style={{
-              width: 32, height: 32, borderRadius: 8, background: bg, flexShrink: 0,
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-            }}>
-              <Icon size={15} color={color} />
-            </div>
-            <div>
-              <div style={{ fontSize: 17, fontWeight: 800, color: 'var(--text-primary)', lineHeight: 1.1 }}>{value}</div>
-              <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-muted)', marginTop: 2 }}>{label}</div>
-            </div>
+        <div className="vd-kpi-row">
+          <div className="vd-kpi">
+            <Clock size={16} />
+            <div><strong>{durationLabel}</strong><span>Duration</span></div>
           </div>
-        ))}
-      </div>
-
-      {/* Services table — ops priority */}
-      <div className="card" style={{ overflow: 'hidden', marginBottom: 14, border: '1px solid var(--border-light)', padding: 0 }}>
-        <div style={{
-          padding: '12px 16px', borderBottom: '1px solid var(--border-light)',
-          display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8,
-          background: 'var(--bg-elevated)',
-        }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <Wrench size={15} color="var(--text-accent)" />
-            <span style={{ fontSize: 14, fontWeight: 800, color: 'var(--text-primary)' }}>Service line items</span>
-            {(visit.service_items?.length ?? 0) > 0 && (
-              <span style={{
-                background: 'rgba(59,130,246,0.1)', color: 'var(--text-accent)',
-                borderRadius: 99, padding: '1px 8px', fontSize: 10, fontWeight: 800,
-              }}>{visit.service_items?.length}</span>
-            )}
+          <div className="vd-kpi accent-purple">
+            <DollarSign size={16} />
+            <div><strong>QAR {(visit.total_price || 0).toLocaleString()}</strong><span>Total</span></div>
           </div>
-          {isActive && (
-            <button type="button" className="btn btn-secondary btn-sm" onClick={() => setShowAddService(true)} style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
-              <Plus size={12} /> Add service
-            </button>
-          )}
+          <div className="vd-kpi accent-blue">
+            <Wrench size={16} />
+            <div><strong>{visit.service_items?.length ?? 0}</strong><span>Services</span></div>
+          </div>
+          <div className="vd-kpi" style={{ borderColor: payStyle.border }}>
+            <CheckCircle size={16} color={payStyle.color} />
+            <div><strong style={{ color: payStyle.color }}>{payStyle.label}</strong><span>Payment</span></div>
+          </div>
         </div>
-        {!visit.service_items?.length ? (
-          <div style={{ padding: '32px 16px', textAlign: 'center', color: 'var(--text-muted)', fontSize: 13 }}>
-            No services on this work order
+      </section>
+
+      {/* Main grid: work order + context */}
+      <div className="vd-main-grid">
+        {/* Services */}
+        <section className="vd-panel vd-panel-primary">
+          <div className="vd-panel-head">
+            <div className="vd-panel-title">
+              <Wrench size={16} /> Work order
+              <span className="vd-count">{visit.service_items?.length ?? 0}</span>
+            </div>
             {isActive && (
-              <div style={{ marginTop: 12 }}>
-                <button type="button" className="btn btn-primary btn-sm" onClick={() => setShowAddService(true)}>
-                  <Plus size={12} /> Add service
-                </button>
-              </div>
+              <button type="button" className="btn btn-secondary btn-sm" onClick={() => setShowAddService(true)}>
+                <Plus size={12} /> Add
+              </button>
             )}
           </div>
-        ) : (
-          <div style={{ overflowX: 'auto' }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 720 }}>
-              <thead>
-                <tr>
-                  {['Service', 'Category', 'Staff', 'Timing', 'Status', 'QAR', ''].map(h => (
-                    <th key={h || 'act'} style={{ ...thStyle, textAlign: h === 'QAR' || h === '' ? 'right' : 'left', paddingRight: h === '' ? 16 : undefined }}>{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
+          {!visit.service_items?.length ? (
+            <div className="vd-empty">No services on this work order</div>
+          ) : (
+            <>
+              <div className="vd-service-list">
                 {visit.service_items.map((item: ServiceItem) => {
                   const svcCfg = SVC_STATUS[item.status] || SVC_STATUS.pending;
                   return (
-                    <tr key={item.id}>
-                      <td style={{ ...tdStyle, fontWeight: 700, color: 'var(--text-primary)' }}>{item.service?.name}</td>
-                      <td style={{ ...tdStyle, textTransform: 'capitalize' }}>{item.service?.category || '—'}</td>
-                      <td style={tdStyle}>
-                        {item.assigned_staff ? (
-                          <span style={{ fontWeight: 600, color: 'var(--text-accent)' }}>{item.assigned_staff.full_name}</span>
-                        ) : isActive ? (
+                    <div key={item.id} className="vd-service-item">
+                      <div className="vd-service-item-main">
+                        <span className="vd-service-name">{item.service?.name}</span>
+                        <span className="vd-service-cat">{item.service?.category}</span>
+                        {item.assigned_staff && (
+                          <span className="vd-service-staff"><User size={11} /> {item.assigned_staff.full_name}</span>
+                        )}
+                        {!item.assigned_staff && isActive && (users as any[]).length > 0 && (
                           <select
-                            style={{
-                              background: 'var(--bg-base)', border: '1px solid var(--border)',
-                              borderRadius: 6, color: 'var(--text-secondary)', fontSize: 11.5,
-                              padding: '4px 8px', fontFamily: 'inherit', outline: 'none', cursor: 'pointer',
-                            }}
+                            className="vd-staff-select"
                             value={staffAssign[item.id] || ''}
                             onChange={e => e.target.value && assignStaff(item.id, Number(e.target.value))}
                           >
-                            <option value="">Assign…</option>
+                            <option value="">Assign staff…</option>
                             {(users as any[]).map((u: any) => (
                               <option key={u.id} value={u.id}>{u.full_name}</option>
                             ))}
                           </select>
-                        ) : '—'}
-                      </td>
-                      <td style={{ ...tdStyle, fontSize: 12, whiteSpace: 'nowrap' }}>
-                        {item.started_at && <span>{fmtQatar(item.started_at, 'hm')}</span>}
-                        {item.actual_duration_minutes ? (
-                          <span style={{ color: 'var(--text-success)', fontWeight: 700 }}> · {fmtDur(item.actual_duration_minutes)}</span>
-                        ) : null}
-                        {!item.started_at && !item.actual_duration_minutes && '—'}
-                      </td>
-                      <td style={tdStyle}>
-                        <span style={{
-                          padding: '3px 10px', borderRadius: 99, fontSize: 10.5, fontWeight: 700,
-                          background: `${svcCfg.color}18`, color: svcCfg.color,
-                        }}>{svcCfg.label}</span>
-                      </td>
-                      <td style={{ ...tdStyle, textAlign: 'right', fontWeight: 800, fontVariantNumeric: 'tabular-nums', color: 'var(--text-purple)' }}>
-                        {(item.price ?? 0).toLocaleString()}
-                      </td>
-                      <td style={{ ...tdStyle, textAlign: 'right', paddingRight: 16 }}>
+                        )}
+                      </div>
+                      <div className="vd-service-item-end">
+                        <span className="vd-svc-status" style={{ color: svcCfg.color, background: `${svcCfg.color}18` }}>{svcCfg.label}</span>
+                        <span className="vd-svc-price">QAR {(item.price ?? 0).toLocaleString()}</span>
                         {isActive && item.status !== 'completed' && (
                           <button
                             type="button"
                             className={item.status === 'pending' ? 'btn btn-secondary btn-sm' : 'btn btn-success btn-sm'}
                             onClick={() => item.status === 'pending' ? startService(item) : completeService(item)}
                             disabled={updateServiceMutation.isPending}
-                            style={{ fontSize: 11, padding: '4px 10px' }}
                           >
                             {item.status === 'pending' ? <><Play size={11} /> Start</> : <><Square size={11} /> Done</>}
                           </button>
                         )}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-              <tfoot>
-                <tr style={{ background: 'var(--bg-elevated)' }}>
-                  <td colSpan={5} style={{ ...tdStyle, fontWeight: 800, color: 'var(--text-muted)', fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-                    Invoice total
-                  </td>
-                  <td style={{ ...tdStyle, textAlign: 'right', fontWeight: 900, fontSize: 16, color: 'var(--text-purple)', fontVariantNumeric: 'tabular-nums' }}>
-                    QAR {(visit.total_price ?? 0).toLocaleString()}
-                  </td>
-                  <td style={tdStyle} />
-                </tr>
-              </tfoot>
-            </table>
-          </div>
-        )}
-      </div>
-
-      {/* Entry record — captured at registration */}
-      <div className="card" style={{ marginBottom: 16 }}>
-        <div style={{ padding: '16px 20px', borderBottom: '1px solid var(--border-light)' }}>
-          <div className="card-title" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <FileText size={16} color="var(--text-accent)" /> Entry record
-          </div>
-          <div style={{ fontSize: 11.5, color: 'var(--text-muted)', marginTop: 4 }}>
-            Details and customer acknowledgement from when this visit was opened
-          </div>
-        </div>
-        <div style={{ padding: '16px 20px' }}>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 24, alignItems: 'flex-start' }}>
-            <div style={{ flex: '1 1 260px', display: 'flex', flexDirection: 'column', gap: 14 }}>
-              <div style={{ display: 'grid', gap: 10 }}>
-                <div>
-                  <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: 0.6 }}>How entered</div>
-                  <div style={{ fontSize: 13, color: 'var(--text-primary)', marginTop: 2 }}>
-                    {ENTRY_METHOD_LABEL[visit.entry_method] || visit.entry_method}
-                  </div>
-                </div>
-                {visit.anpr_camera_seconds != null && visit.anpr_camera_seconds > 0 && (
-                  <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
-                    <ScanLine size={14} color="var(--text-muted)" style={{ marginTop: 2, flexShrink: 0 }} />
-                    <div>
-                      <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: 0.6 }}>ANPR camera track</div>
-                      <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginTop: 2 }}>
-                        {fmtCamSec(visit.anpr_camera_seconds)} in frame (VisionFlow). Visit entry time was aligned using this camera dwell when the visit was created from linked ANPR data.
                       </div>
                     </div>
-                  </div>
-                )}
-                {visit.customer_phone && (
-                  <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
-                    <Phone size={14} color="var(--text-muted)" style={{ marginTop: 2, flexShrink: 0 }} />
-                    <div>
-                      <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: 0.6 }}>Phone</div>
-                      <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginTop: 2 }}>{visit.customer_phone}</div>
-                    </div>
-                  </div>
-                )}
-                {visit.customer_email && (
-                  <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
-                    <Mail size={14} color="var(--text-muted)" style={{ marginTop: 2, flexShrink: 0 }} />
-                    <div>
-                      <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: 0.6 }}>Email</div>
-                      <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginTop: 2, wordBreak: 'break-all' }}>{visit.customer_email}</div>
-                    </div>
-                  </div>
-                )}
-                {visit.exit_time && (
-                  <div>
-                    <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: 0.6 }}>Checkout time</div>
-                    <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginTop: 2 }}>
-                      {fmtQatar(visit.exit_time, 'full')}
-                    </div>
-                  </div>
-                )}
-                {visit.plate_confidence != null && visit.plate_confidence > 0 && (
-                  <div>
-                    <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: 0.6 }}>Plate read confidence</div>
-                    <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginTop: 2 }}>
-                      {(visit.plate_confidence * 100).toFixed(0)}%
-                    </div>
-                  </div>
-                )}
+                  );
+                })}
               </div>
-              {visit.notes && (
-                <div>
-                  <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: 0.6, marginBottom: 6 }}>Visit notes</div>
-                  <div style={{
-                    fontSize: 13, color: 'var(--text-secondary)', lineHeight: 1.5,
-                    padding: '12px 14px', borderRadius: 10,
-                    background: 'var(--bg-base)', border: '1px solid var(--border-light)',
-                    whiteSpace: 'pre-wrap',
-                  }}>
-                    {visit.notes}
-                  </div>
-                </div>
-              )}
-            </div>
+              <div className="vd-invoice-total">
+                <span>Invoice total</span>
+                <strong>QAR {(visit.total_price ?? 0).toLocaleString()}</strong>
+              </div>
+            </>
+          )}
+        </section>
 
-            <div style={{ flex: '0 1 320px', width: '100%' }}>
-              <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: 0.6, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
-                <PenLine size={12} /> Supervisor sign-off
-              </div>
-              {signatureSrc ? (
-                <div style={{
-                  borderRadius: 12, border: '1px solid var(--border-light)',
-                  background: '#fff', padding: 12,
-                  boxSizing: 'border-box',
-                }}>
-                  <img
-                    src={signatureSrc}
-                    alt="Supervisor signature"
-                    style={{ display: 'block', width: '100%', maxHeight: 160, objectFit: 'contain' }}
-                  />
-                  {visit.supervisor_signed_by_user && (
-                    <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-secondary)', marginTop: 8, textAlign: 'center' }}>
-                      {visit.supervisor_signed_by_user.full_name}
-                    </div>
-                  )}
-                  {visit.signature_captured_at && (
-                    <div style={{ fontSize: 11, color: '#64748b', marginTop: 6, textAlign: 'center' }}>
-                      Signed {fmtQatar(visit.signature_captured_at, 'dmyHm')}
-                    </div>
-                  )}
-                </div>
-              ) : (
-                <div style={{
-                  padding: '28px 16px', borderRadius: 12, textAlign: 'center',
-                  border: '1px dashed var(--border)', color: 'var(--text-muted)', fontSize: 13,
-                }}>
-                  No supervisor signature on file
-                </div>
-              )}
-            </div>
+        {/* Context sidebar */}
+        <aside className="vd-panel vd-panel-aside">
+          <div className="vd-panel-head">
+            <div className="vd-panel-title"><FileText size={16} /> Registration</div>
           </div>
-
+          <dl className="vd-facts">
+            <div><dt>Entry</dt><dd>{ENTRY_METHOD_LABEL[visit.entry_method] || visit.entry_method}</dd></div>
+            {visit.anpr_camera_seconds != null && visit.anpr_camera_seconds > 0 && (
+              <div><dt>ANPR track</dt><dd>{fmtCamSec(visit.anpr_camera_seconds)} in frame{visit.anpr_camera_name ? ` · ${visit.anpr_camera_name}` : ''}</dd></div>
+            )}
+            {visit.exit_time && (
+              <div><dt>Checkout</dt><dd>{fmtQatar(visit.exit_time, 'full')}</dd></div>
+            )}
+            {visit.customer_email && (
+              <div><dt>Email</dt><dd>{visit.customer_email}</dd></div>
+            )}
+            {visit.notes && (
+              <div className="vd-facts-notes"><dt>Notes</dt><dd>{visit.notes}</dd></div>
+            )}
+          </dl>
+          <div className="vd-signature-block">
+            <div className="vd-panel-title small"><PenLine size={14} /> Supervisor sign-off</div>
+            {signatureSrc ? (
+              <div className="vd-signature-box">
+                <img src={signatureSrc} alt="Supervisor signature" />
+                {visit.supervisor_signed_by_user && (
+                  <p className="vd-sig-name">{visit.supervisor_signed_by_user.full_name}</p>
+                )}
+                {visit.signature_captured_at && (
+                  <p className="vd-sig-time">Signed {fmtQatar(visit.signature_captured_at, 'dmyHm')}</p>
+                )}
+              </div>
+            ) : (
+              <div className="vd-empty small">No signature on file</div>
+            )}
+          </div>
           {(resolveMediaUrl(visit.plate_image_url) || resolveMediaUrl(visit.entry_camera_snapshot)) && (
-            <div style={{ marginTop: 20, paddingTop: 16, borderTop: '1px solid var(--border-light)' }}>
-              <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: 0.6, marginBottom: 10 }}>Entry images</div>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12 }}>
+            <div className="vd-captures">
+              <div className="vd-panel-title small">Entry images</div>
+              <div className="vd-capture-grid">
                 {resolveMediaUrl(visit.plate_image_url) && (
-                  <div>
-                    <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 6 }}>Plate capture</div>
-                    <img
-                      src={resolveMediaUrl(visit.plate_image_url)}
-                      alt="Plate"
-                      style={{ maxWidth: 200, maxHeight: 120, borderRadius: 8, border: '1px solid var(--border-light)', objectFit: 'cover' }}
-                    />
-                  </div>
+                  <img src={resolveMediaUrl(visit.plate_image_url)} alt="Plate" />
                 )}
                 {resolveMediaUrl(visit.entry_camera_snapshot) && (
-                  <div>
-                    <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 6 }}>Camera snapshot</div>
-                    <img
-                      src={resolveMediaUrl(visit.entry_camera_snapshot)}
-                      alt="Entry snapshot"
-                      style={{ maxWidth: 200, maxHeight: 120, borderRadius: 8, border: '1px solid var(--border-light)', objectFit: 'cover' }}
-                    />
-                  </div>
+                  <img src={resolveMediaUrl(visit.entry_camera_snapshot)} alt="Camera" />
                 )}
               </div>
             </div>
           )}
-        </div>
+        </aside>
       </div>
 
-      {/* Customer visit analytics — same vehicle / customer history */}
-      <div
-        style={{
-          marginBottom: 20,
-          borderRadius: 20,
-          overflow: 'hidden',
-          border: '1px solid var(--border-light)',
-          background: 'linear-gradient(165deg, var(--bg-surface) 0%, var(--bg-elevated) 55%, rgba(139,92,246,0.04) 100%)',
-          boxShadow: '0 2px 24px rgba(0,0,0,0.12)',
-        }}
-      >
-        <div style={{
-          padding: '22px 24px',
-          borderBottom: '1px solid var(--border-light)',
-          background: 'linear-gradient(135deg, rgba(139,92,246,0.08), rgba(59,130,246,0.05))',
-        }}>
-          <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap' }}>
-            <div style={{ display: 'flex', gap: 14, alignItems: 'flex-start' }}>
-              <div style={{
-                width: 44, height: 44, borderRadius: 14, flexShrink: 0,
-                background: 'linear-gradient(135deg, rgba(139,92,246,0.25), rgba(59,130,246,0.15))',
-                border: '1px solid rgba(139,92,246,0.25)',
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-              }}>
-                <BarChart3 size={22} color="#a78bfa" />
-              </div>
-              <div>
-                <h2 style={{ margin: 0, fontSize: 17, fontWeight: 800, color: 'var(--text-primary)', letterSpacing: '-0.3px' }}>
-                  Customer insights
-                </h2>
-                <p style={{ margin: '6px 0 0', fontSize: 12.5, color: 'var(--text-secondary)', lineHeight: 1.55, maxWidth: 520 }}>
-                  Spending and visit rhythm for this vehicle
-                  {visit.customer_name ? <> · <strong style={{ color: 'var(--text-primary)' }}>{visit.customer_name}</strong></> : null}
-                  {' '}in the window you select — tap a row to open that visit.
-                </p>
-              </div>
+      {/* Customer history — expandable */}
+      <section className="vd-history-section">
+        <button type="button" className="vd-history-toggle" onClick={() => setShowHistory(v => !v)}>
+          <div className="vd-history-toggle-left">
+            <BarChart3 size={18} />
+            <div>
+              <strong>Customer history</strong>
+              <span>{analyticsSummary.count} visit{analyticsSummary.count !== 1 ? 's' : ''} · QAR {Math.round(analyticsSummary.total).toLocaleString()} in {analyticsWindow.label.toLowerCase()}</span>
             </div>
-            <div style={{ display: 'flex', gap: 6, padding: 4, borderRadius: 12, background: 'var(--bg-base)', border: '1px solid var(--border-light)' }}>
-              {([
-                { id: 'week' as const, short: 'Week' },
-                { id: 'month' as const, short: 'Month' },
-                { id: '30d' as const, short: '30 days' },
-              ]).map(tab => {
-                const on = analyticsRange === tab.id;
-                return (
-                  <button
-                    key={tab.id}
-                    type="button"
-                    onClick={() => setAnalyticsRange(tab.id)}
-                    style={{
-                      padding: '8px 14px', borderRadius: 9, border: 'none', cursor: 'pointer',
-                      fontSize: 12, fontWeight: 700,
-                      background: on ? 'linear-gradient(135deg, rgba(139,92,246,0.35), rgba(59,130,246,0.25))' : 'transparent',
-                      color: on ? '#fff' : 'var(--text-secondary)',
-                      boxShadow: on ? '0 4px 14px rgba(139,92,246,0.35)' : 'none',
-                      transition: 'all 0.18s ease',
-                    }}
-                  >
-                    {tab.short}
-                  </button>
-                );
-              })}
-            </div>
+          </div>
+          <ChevronRight size={18} className={showHistory ? 'vd-chevron-open' : ''} />
+        </button>
+        {showHistory && (
+        <div className="vd-history-body">
+        <div className="vd-history-toolbar">
+          <div style={{ display: 'flex', gap: 6, padding: 4, borderRadius: 12, background: 'var(--bg-base)', border: '1px solid var(--border-light)' }}>
+            {([
+              { id: 'week' as const, short: 'Week' },
+              { id: 'month' as const, short: 'Month' },
+              { id: '30d' as const, short: '30 days' },
+            ]).map(tab => {
+              const on = analyticsRange === tab.id;
+              return (
+                <button
+                  key={tab.id}
+                  type="button"
+                  onClick={() => setAnalyticsRange(tab.id)}
+                  className={`vd-range-tab${on ? ' active' : ''}`}
+                >
+                  {tab.short}
+                </button>
+              );
+            })}
           </div>
         </div>
 
-        <div style={{ padding: '20px 24px 24px' }}>
+        <div style={{ padding: '0 0 8px' }}>
           {analyticsLoading ? (
             <div style={{ display: 'flex', justifyContent: 'center', padding: 48, color: 'var(--text-muted)', gap: 10, alignItems: 'center' }}>
               <div className="spinner" style={{ width: 22, height: 22 }} /> Loading analytics…
@@ -1001,7 +750,9 @@ export const VisitDetail: React.FC = () => {
             </>
           )}
         </div>
-      </div>
+        </div>
+        )}
+      </section>
 
       {/* Add service modal */}
       {showAddService && (

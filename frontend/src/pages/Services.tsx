@@ -70,12 +70,11 @@ const ServiceDetailPanel: React.FC<{
   onEdit: () => void;
   onDelete: () => void;
 }> = ({ svc, cfg, onEdit, onDelete }) => (
-  <div style={{
+  <div className="expand-panel" style={{
     background: 'linear-gradient(180deg, rgba(59,130,246,0.04) 0%, var(--bg-base) 100%)',
     borderTop: '1px solid var(--border-light)',
-    padding: '18px 20px 20px 62px',
   }}>
-    <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 16, alignItems: 'start' }}>
+    <div className="rcols-1-auto" style={{ display: 'grid', gap: 16, alignItems: 'start' }}>
       <div>
         <div style={{ fontSize: 11, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--text-muted)', marginBottom: 8 }}>
           Description
@@ -384,7 +383,7 @@ export const Services: React.FC = () => {
           </div>
         ) : (
           <>
-            <div style={{ overflowX: 'auto' }}>
+            <div className="table-scroll">
               <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 880 }}>
                 <thead>
                   <tr style={{ position: 'sticky', top: 0, zIndex: 2 }}>

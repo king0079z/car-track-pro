@@ -111,6 +111,7 @@ export const GlobalSearch: React.FC = () => {
     <>
       {/* Trigger button */}
       <button
+        className="gs-trigger"
         onClick={() => setOpen(true)}
         style={{
           display: 'flex', alignItems: 'center', gap: 8,
@@ -123,8 +124,8 @@ export const GlobalSearch: React.FC = () => {
         onMouseLeave={e => (e.currentTarget.style.borderColor = 'var(--border)')}
       >
         <Search size={13} />
-        <span>Search...</span>
-        <span style={{
+        <span className="gs-label">Search...</span>
+        <span className="gs-kbd" style={{
           marginLeft: 'auto', fontSize: 10, fontFamily: 'monospace',
           padding: '1px 6px', borderRadius: 4,
           background: 'var(--bg-base)', border: '1px solid var(--border)', color: 'var(--text-muted)',

@@ -65,12 +65,11 @@ const VehicleExpandPanel: React.FC<{
   const tc = TYPE_COLORS[vehicle.vehicle_type || 'other'] || '#94a3b8';
   const colorDot = COLOR_DOTS[vehicle.color?.toLowerCase() || ''];
   return (
-    <div style={{
+    <div className="expand-panel" style={{
       background: 'linear-gradient(180deg, rgba(16,185,129,0.04) 0%, var(--bg-base) 100%)',
       borderTop: '1px solid var(--border-light)',
-      padding: '18px 20px 20px 62px',
     }}>
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 16, alignItems: 'start' }}>
+      <div className="rcols-1-auto" style={{ display: 'grid', gap: 16, alignItems: 'start' }}>
         <div>
           <div style={{ fontSize: 11, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--text-muted)', marginBottom: 12 }}>
             Vehicle details
@@ -243,8 +242,8 @@ const VehicleCard: React.FC<{ vehicle: Vehicle; onDelete: () => void }> = ({ veh
         )}
 
         {/* Stats row */}
-        <div style={{
-          display: 'grid', gridTemplateColumns: '1fr 1fr 1fr',
+        <div className="rcols-3" style={{
+          display: 'grid',
           borderTop: '1px solid var(--border-light)', paddingTop: 12,
           position: 'relative', zIndex: 1,
         }}>
@@ -738,7 +737,7 @@ export const Vehicles: React.FC = () => {
                   {sortedFiltered.length} vehicle{sortedFiltered.length !== 1 ? 's' : ''}
                 </div>
               </div>
-              <div style={{ overflowX: 'auto' }}>
+              <div className="table-scroll">
                 <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 960 }}>
                   <thead>
                     <tr style={{ position: 'sticky', top: 0, zIndex: 2 }}>
@@ -889,7 +888,7 @@ export const Vehicles: React.FC = () => {
               <button className="btn btn-ghost btn-icon" onClick={() => setShowForm(false)}><X size={16} /></button>
             </div>
             <div className="modal-body">
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
+              <div className="rcols-2" style={{ display: 'grid', gap: 14 }}>
                 {[
                   { label: 'Plate Number *', key: 'plate_number', mono: true, span: false },
                   { label: 'Vehicle Type', key: 'vehicle_type', type: 'select', opts: ['sedan','suv','truck','van','motorcycle','other'], span: false },
