@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useCallback } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Plus, Search, LogOut, Eye, Trash2, X,
   Car, Zap, Download, Calendar, TrendingUp,
@@ -9,12 +9,13 @@ import {
   ChevronDown, ExternalLink, ArrowUpDown, ArrowUp, ArrowDown, Layers, Wrench,
 } from 'lucide-react';
 import { visitsApi } from '../../services/api';
-import { isWithinInterval } from 'date-fns';
+import { visitShopDurationMinutes, isActiveVisitStatus } from '../../utils/visitDuration';
 import {
   fmtQatar,
   qatarStartOfMonth,
   qatarStartOfToday,
   qatarStartOfWeekMonday,
+  qatarEndOfToday,
   qatarYmd,
   qatarYmdAddDays,
   zonedBoundsFromYmd,
@@ -23,6 +24,7 @@ import toast from 'react-hot-toast';
 import type { Visit, VisitStatus } from '../../types';
 import { useAuth } from '../../contexts/AuthContext';
 import { isOrgWideUser } from '../../lib/permissions';
+import { OpsQuickNav } from '../../components/ops/OpsQuickNav';
 
 function useLiveTimer(entryTime: string) {
   const [mins, setMins] = useState(() =>
@@ -89,9 +91,11 @@ const StatusPill: React.FC<{ status: VisitStatus }> = ({ status }) => {
 };
 
 const TimerCell: React.FC<{ visit: Visit }> = ({ visit }) => {
-  const mins = useLiveTimer(visit.entry_time);
-  const isActive = ['waiting', 'in_service', 'on_hold'].includes(visit.status);
-  const display = visit.duration_minutes ? fmtDur(Math.round(visit.duration_minutes)) : fmtDur(mins);
+  const wallMins = useLiveTimer(visit.entry_time);
+  const isActive = isActiveVisitStatus(visit.status);
+  const shopMins = visitShopDurationMinutes(visit);
+  const mins = shopMins ?? wallMins;
+  const display = fmtDur(Math.round(mins));
   const color = mins > 120 ? '#ef4444' : mins > 60 ? '#f59e0b' : '#10b981';
 
   return (
@@ -127,6 +131,28 @@ const PAGE_SIZE = 20;
 
 type SortKey = 'visit' | 'plate' | 'entry' | 'duration' | 'status' | 'revenue';
 type SortDir = 'asc' | 'desc';
+
+function dateRangeForFilter(dateFilter: string, now = new Date()): { start: Date; end: Date } | null {
+  switch (dateFilter) {
+    case 'today':
+      return { start: qatarStartOfToday(now), end: qatarEndOfToday(now) };
+    case 'yesterday':
+      return zonedBoundsFromYmd(qatarYmdAddDays(qatarYmd(now), -1));
+    case 'week':
+      return { start: qatarStartOfWeekMonday(now), end: qatarEndOfToday(now) };
+    case 'month':
+      return { start: qatarStartOfMonth(now), end: qatarEndOfToday(now) };
+    default:
+      return null;
+  }
+}
+
+function visitInDateRange(entryTime: string, range: { start: Date; end: Date } | null): boolean {
+  if (!range) return true;
+  const t = new Date(entryTime).getTime();
+  if (Number.isNaN(t)) return false;
+  return t >= range.start.getTime() && t <= range.end.getTime();
+}
 
 const thStyle: React.CSSProperties = {
   padding: '11px 14px',
@@ -264,23 +290,33 @@ function exportCSV(visits: Visit[]) {
 
 export const VisitsList: React.FC = () => {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const floorView = searchParams.get('view') === 'floor';
   const qc = useQueryClient();
-  const { user } = useAuth();
+  const { user, isAuthenticated, isLoading: authLoading } = useAuth();
   const orgWide = isOrgWideUser(user);
   const [search, setSearch] = useState('');
   const [status, setStatus] = useState<VisitStatus | ''>('');
   const [dateFilter, setDateFilter] = useState('all');
+  const [overdueOnly, setOverdueOnly] = useState(false);
   const [deleteId, setDeleteId] = useState<number | null>(null);
   const [page, setPage] = useState(1);
   const [expandedId, setExpandedId] = useState<number | null>(null);
-  const [sortKey, setSortKey] = useState<SortKey>('entry');
+  const [sortKey, setSortKey] = useState<SortKey>(floorView ? 'duration' : 'entry');
   const [sortDir, setSortDir] = useState<SortDir>('desc');
 
-  const { data: visits = [], isLoading } = useQuery({
+  const { data: visits = [], isLoading, isError, refetch } = useQuery({
     queryKey: ['visits', status],
     queryFn: () => visitsApi.list({ status: status || undefined, limit: 500 }).then(r => r.data),
     refetchInterval: 15000,
+    enabled: isAuthenticated && !authLoading,
+    retry: 3,
+    refetchOnMount: 'always',
   });
+
+  React.useEffect(() => {
+    if (floorView) setSortKey('duration');
+  }, [floorView]);
 
   const checkoutMutation = useMutation({
     mutationFn: (id: number) => visitsApi.checkout(id),
@@ -294,38 +330,34 @@ export const VisitsList: React.FC = () => {
     onError: () => toast.error('Delete failed'),
   });
 
-  const getDateRange = useCallback(() => {
-    const now = new Date();
-    switch (dateFilter) {
-      case 'today':
-        return { start: qatarStartOfToday(now), end: now };
-      case 'yesterday':
-        return zonedBoundsFromYmd(qatarYmdAddDays(qatarYmd(now), -1));
-      case 'week':
-        return { start: qatarStartOfWeekMonday(now), end: now };
-      case 'month':
-        return { start: qatarStartOfMonth(now), end: now };
-      default:
-        return null;
-    }
-  }, [dateFilter]);
+  const getDateRange = useCallback(() => dateRangeForFilter(dateFilter), [dateFilter]);
+
+  const dateScoped = useMemo(() => {
+    const range = getDateRange();
+    return (visits as Visit[]).filter(v => visitInDateRange(v.entry_time, range));
+  }, [visits, getDateRange]);
 
   const filtered = useMemo(() => {
-    const range = getDateRange();
-    return (visits as Visit[]).filter(v => {
+    return dateScoped.filter(v => {
+      if (floorView && !status && !['waiting', 'in_service', 'on_hold'].includes(v.status)) {
+        return false;
+      }
+      if (overdueOnly) {
+        const mins = Math.floor((Date.now() - new Date(v.entry_time).getTime()) / 60000);
+        if (mins <= 90 || !['waiting', 'in_service', 'on_hold'].includes(v.status)) return false;
+      }
       const textMatch = !search ||
         v.vehicle?.plate_number?.toLowerCase().includes(search.toLowerCase()) ||
         v.customer_name?.toLowerCase().includes(search.toLowerCase()) ||
         v.visit_number?.toLowerCase().includes(search.toLowerCase());
-      const dateMatch = !range || isWithinInterval(new Date(v.entry_time), range);
-      return textMatch && dateMatch;
+      return textMatch;
     });
-  }, [visits, search, getDateRange]);
+  }, [dateScoped, search, floorView, status, overdueOnly]);
 
-  const counts = useMemo(() => (visits as Visit[]).reduce((acc, v) => {
+  const counts = useMemo(() => dateScoped.reduce((acc, v) => {
     acc[v.status] = (acc[v.status] || 0) + 1;
     return acc;
-  }, {} as Record<string, number>), [visits]);
+  }, {} as Record<string, number>), [dateScoped]);
 
   // Summary stats
   const summaryStats = useMemo(() => {
@@ -406,6 +438,8 @@ export const VisitsList: React.FC = () => {
         @keyframes visits-shimmer { 0%{background-position:0% 50%}100%{background-position:200% 50%} }
       `}</style>
 
+      <OpsQuickNav primaryAction={{ to: '/visits/new', label: 'Work order' }} />
+
       {/* Hero */}
       <div style={{
         position: 'relative',
@@ -435,7 +469,9 @@ export const VisitsList: React.FC = () => {
               </div>
               <div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 8 }}>
-                  <h1 className="page-title" style={{ margin: 0, fontSize: 26, letterSpacing: '-0.02em' }}>Visits</h1>
+                  <h1 className="page-title" style={{ margin: 0, fontSize: 26, letterSpacing: '-0.02em' }}>
+                    {floorView ? 'Shop floor' : 'Visits'}
+                  </h1>
                   <span style={{
                     display: 'inline-flex', alignItems: 'center', gap: 6,
                     fontSize: 10, fontWeight: 800, letterSpacing: '0.14em', textTransform: 'uppercase',
@@ -587,6 +623,14 @@ export const VisitsList: React.FC = () => {
               )}
             </button>
           ))}
+          <button
+            type="button"
+            className={`ops-queue-tab${overdueOnly ? ' active warn' : ''}`}
+            onClick={() => setOverdueOnly(v => !v)}
+            title="Show vehicles waiting more than 90 minutes"
+          >
+            <AlertTriangle size={12} /> Overdue{summaryStats.overdueActive > 0 ? ` (${summaryStats.overdueActive})` : ''}
+          </button>
         </div>
         <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
           <div className="search-wrap" style={{ flex: '1 1 240px', maxWidth: 420 }}>
@@ -648,10 +692,19 @@ export const VisitsList: React.FC = () => {
           </div>
           <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-muted)' }}>{sorted.length} records</span>
         </div>
-        {isLoading ? (
+        {isLoading || (authLoading && !visits.length) ? (
           <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', padding: 64, flexDirection: 'column', gap: 12 }}>
             <div className="spinner" style={{ width: 32, height: 32 }} />
             <span style={{ fontSize: 13, color: 'var(--text-muted)' }}>Loading visits...</span>
+          </div>
+        ) : isError ? (
+          <div className="empty-state">
+            <AlertTriangle size={36} color="var(--text-warning)" style={{ marginBottom: 12 }} />
+            <h3>Could not load visits</h3>
+            <p>The server may be restarting. Retry in a moment.</p>
+            <button type="button" className="btn btn-primary" style={{ marginTop: 16 }} onClick={() => refetch()}>
+              <RefreshCw size={14} /> Retry
+            </button>
           </div>
         ) : paginated.length === 0 ? (
           <div className="empty-state">
@@ -662,7 +715,23 @@ export const VisitsList: React.FC = () => {
               <Car size={30} color="var(--text-accent)" />
             </div>
             <h3>No visits found</h3>
-            <p>Try adjusting your filters or register a new entry.</p>
+            <p>
+              {dateScoped.length > 0 && filtered.length === 0
+                ? 'Active filters hide matching visits — try Reset filters or choose All dates.'
+                : dateFilter !== 'all' && (visits as Visit[]).length > 0
+                  ? `No visits in this date range. ${(visits as Visit[]).length} total on file — switch to All to browse history.`
+                  : 'Try adjusting your filters or register a new entry.'}
+            </p>
+            {(search || dateFilter !== 'all' || overdueOnly || floorView) && (
+              <button
+                type="button"
+                className="btn btn-secondary"
+                style={{ marginTop: 12 }}
+                onClick={() => { setSearch(''); setDateFilter('all'); setOverdueOnly(false); setStatus(''); navigate('/visits'); }}
+              >
+                <X size={12} /> Clear all filters
+              </button>
+            )}
             <Link to="/visits/new" className="btn btn-primary" style={{ marginTop: 16 }}>
               <Zap size={14} /> New work order
             </Link>

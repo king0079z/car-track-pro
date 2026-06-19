@@ -32,11 +32,16 @@ def _start_tunnel_if_needed(cam: dict[str, Any]) -> None:
     if str(cam.get("type")) != "dahua_p2p":
         return
     mode = str(cam.get("connection_mode") or "auto").lower()
-    if mode not in ("p2p", "auto"):
+    if mode not in ("p2p", "auto", "cartrack_cloud"):
         return
     serial = str(cam.get("device_serial") or "").strip()
     password = str(cam.get("password") or "")
     if not serial or not password:
+        return
+    if mode == "cartrack_cloud":
+        from .cartrack_cloud_tunnel import ensure_tunnel_running
+
+        ensure_tunnel_running(cam)
         return
     from .dahua_p2p_tunnel import check_p2p_dependencies, get_p2p_tunnel_manager
 

@@ -223,24 +223,94 @@ def accept_plate_read(text: str, *, jurisdiction: str, strict: bool) -> bool:
                 return False
             if key.isalpha() and len(key) <= 5:
                 return False
-        return True
+            # Reject letter-first / short-digit noise (e.g. DHH34, 7YTC) — Qatar private is 3–5 digits + 2–3 letters.
+            if len(digits) >= 3 and len(letters) >= 2:
+                return True
+            if len(digits) >= 4 and len(letters) == 0:
+                return True
+            return False
+        return bool(_INTL.match(key)) and len(key) >= 5
     return matches_jurisdiction(cleaned, jurisdiction)
 
 
 def sync_eligible_plate(text: str, *, jurisdiction: str) -> bool:
-    """Plates worth writing to CarTrack — stricter than raw OCR, looser than fleet test IDs."""
-    if accept_plate_read(text, jurisdiction=jurisdiction, strict=False):
-        return True
-    key = normalize_plate(format_qatar_plate(text))
-    if len(key) < 5:
+    """Plates worth writing to CarTrack — stricter than on-screen OCR preview."""
+    cleaned = format_qatar_plate(text)
+    key = normalize_plate(cleaned)
+    if len(key) < 4:
         return False
-    digits = sum(1 for c in key if c.isdigit())
-    letters = sum(1 for c in key if c.isalpha())
-    if digits >= 2 and letters >= 2:
+    j = (jurisdiction or "intl").strip().lower()
+    if j in ("qa", "qa_uk", "qa-uk", "qatar_uk"):
+        if _QA_COMMERCIAL.match(key):
+            return len(key) >= 4
+        if _QA_SPECIAL_Q.match(key):
+            return True
+        if _QA_SPLIT.match(key):
+            return True
+        digits, letters = _split_digits_letters(key)
+        if len(digits) >= 3 and len(letters) >= 2:
+            return True
+        return False
+    if j == "uk":
+        return bool(_UK.match(key))
+    return bool(_INTL.match(key)) and len(key) >= 5
+
+
+def manifest_sync_quality_ok(
+    row: dict,
+    *,
+    min_votes: int = 2,
+    min_dwell_sec: float = 0.8,
+    high_conf: float = 0.88,
+) -> bool:
+    """Whether a live manifest row has enough evidence to write into CarTrack."""
+    plate = str(row.get("plate") or "").strip()
+    if not plate or plate in ("—", "…", "UNKNOWN"):
+        return False
+    votes = int(row.get("ocr_vote_count") or 0)
+    conf = float(row.get("ocr_confidence") or 0.0)
+    dwell = float(row.get("duration_sec") or 0.0)
+    key = normalize_plate(format_qatar_plate(plate))
+    commercial = bool(_QA_COMMERCIAL.match(key))
+    if votes >= min_votes and dwell >= min_dwell_sec:
         return True
-    if digits >= 1 and letters >= 4 and len(key) >= 6:
+    # Stationary commercial plates (e.g. 652190): one strong read + a few seconds visible.
+    if commercial and votes >= 1 and conf >= high_conf and dwell >= 1.2:
+        return True
+    if votes >= 1 and conf >= high_conf and dwell >= 1.5:
+        return True
+    # Fragmented tracks merged by plate — multiple weak reads on the same car.
+    if votes >= 3 and dwell >= 0.5:
         return True
     return False
+
+
+def aggregate_manifest_rows_by_plate(rows: list[dict]) -> list[dict]:
+    """Merge track fragments that read the same plate (BoT-SORT re-ID on stationary cars)."""
+    merged: dict[str, dict] = {}
+    for v in rows or []:
+        plate = str(v.get("plate") or "").strip()
+        if not plate or plate in ("—", "…", "UNKNOWN"):
+            continue
+        key = normalize_plate(format_qatar_plate(plate))
+        if len(key) < 4:
+            continue
+        if key not in merged:
+            merged[key] = dict(v)
+            merged[key]["plate"] = format_qatar_plate(plate) or plate
+            merged[key]["ocr_vote_count"] = int(v.get("ocr_vote_count") or 0)
+            merged[key]["duration_sec"] = float(v.get("duration_sec") or 0.0)
+            merged[key]["ocr_confidence"] = float(v.get("ocr_confidence") or 0.0)
+            merged[key]["segment_count"] = int(v.get("segment_count") or 1)
+            continue
+        agg = merged[key]
+        agg["ocr_vote_count"] = int(agg.get("ocr_vote_count") or 0) + int(v.get("ocr_vote_count") or 0)
+        agg["duration_sec"] = max(float(agg.get("duration_sec") or 0.0), float(v.get("duration_sec") or 0.0))
+        agg["ocr_confidence"] = max(float(agg.get("ocr_confidence") or 0.0), float(v.get("ocr_confidence") or 0.0))
+        agg["segment_count"] = int(agg.get("segment_count") or 1) + int(v.get("segment_count") or 1)
+        if str(v.get("status") or "").lower() == "active":
+            agg["status"] = "active"
+    return list(merged.values())
 
 
 def _weighted_mode(counter: dict[Any, float]) -> Any:
@@ -363,6 +433,20 @@ def _row_dwell_sec(row: dict) -> float:
     return float(row.get("duration_sec") or max(0.0, t1 - t0))
 
 
+def _apply_presence_durations(rows: list[dict], *, now_sec: float | None) -> None:
+    """Shop/service presence timer — counts while Live, pauses when Paused, locks on Done."""
+    for r in rows:
+        in_frame = _row_dwell_sec(r)
+        status = str(r.get("status") or "").lower()
+        if status == "active" and now_sec is not None:
+            t_exit = float(r.get("t_exit_sec") or 0.0)
+            presence = in_frame + max(0.0, now_sec - t_exit)
+        else:
+            presence = in_frame
+        r["presence_duration_sec"] = round(presence, 3)
+        r["shop_first_seen_sec"] = round(float(r.get("t_enter_sec") or 0.0), 3)
+
+
 def consolidate_vehicle_rows(
     rows: list[dict],
     *,
@@ -370,6 +454,7 @@ def consolidate_vehicle_rows(
     resume_gap_sec: float = 7200.0,
     min_unknown_sec: float = 0.3,
     now_sec: float | None = None,
+    jurisdiction: str = "qa_uk",
 ) -> list[dict]:
     """
     Merge duplicate manifest rows caused by track ID switches, OCR drift, or
@@ -544,6 +629,9 @@ def consolidate_vehicle_rows(
         tid = row.get("track_id")
         if tid is not None and tid in known_tids:
             continue
+        # Ghost OCR on empty pavement — never surface as "Unknown" with fake votes.
+        if int(row.get("ocr_vote_count") or 0) > 0 and _is_unknown_plate(row.get("plate")):
+            continue
         t0 = float(row.get("t_enter_sec") or 0)
         t1 = float(row.get("t_exit_sec") or t0)
         if (t1 - t0) < min_unknown_sec:
@@ -565,7 +653,18 @@ def consolidate_vehicle_rows(
         label = "…" if str(row.get("status")) == "active" else "Unknown"
         seen_unknown[key] = {**row, "plate": label}
 
-    result = merged + list(seen_unknown.values())
+    live_session = now_sec is not None
+    if live_session:
+        j = (jurisdiction or "qa_uk").strip().lower()
+        merged = [
+            m
+            for m in merged
+            if not _is_unknown_plate(m.get("plate"))
+            and sync_eligible_plate(str(m.get("plate") or ""), jurisdiction=j)
+        ]
+        result = merged
+    else:
+        result = merged + list(seen_unknown.values())
 
     # Authoritative Paused/Done flag: an exited vehicle is "Paused" (waiting to
     # resume) only while time-since-last-seen is within the waiting period. This
@@ -585,6 +684,8 @@ def consolidate_vehicle_rows(
             r["resume_eligible"] = True
         else:
             r.pop("resume_eligible", None)
+
+    _apply_presence_durations(result, now_sec=now_sec)
 
     result.sort(key=lambda r: float(r.get("t_enter_sec") or 0))
 

@@ -5,13 +5,17 @@ import {
   CheckCircle2,
   Cloud,
   Loader2,
+  QrCode,
   Router,
   Sparkles,
   Video,
   Wifi,
   X,
 } from 'lucide-react';
+import toast from 'react-hot-toast';
+import { DahuaQrScanner } from './DahuaQrScanner';
 import type { CameraInput, CameraType } from '../services/api';
+import { parseDahuaQrPayload } from '../utils/dahuaQr';
 
 const inputStyle: React.CSSProperties = {
   width: '100%',
@@ -70,6 +74,7 @@ export const CameraSetupWizard: React.FC<Props> = ({ open, busy, onClose, onSubm
   const [step, setStep] = useState<StepId>('type');
   const [form, setForm] = useState<CameraInput>(emptyCameraForm);
   const [error, setError] = useState<string | null>(null);
+  const [qrScannerOpen, setQrScannerOpen] = useState(false);
 
   const setField = useCallback((key: keyof CameraInput, value: unknown) => {
     setForm(prev => ({ ...prev, [key]: value }));
@@ -84,9 +89,28 @@ export const CameraSetupWizard: React.FC<Props> = ({ open, busy, onClose, onSubm
 
   const handleClose = useCallback(() => {
     if (busy) return;
+    setQrScannerOpen(false);
     reset();
     onClose();
   }, [busy, onClose, reset]);
+
+  const applyQrScan = useCallback((raw: string) => {
+    try {
+      const parsed = parseDahuaQrPayload(raw);
+      setForm(prev => ({
+        ...prev,
+        device_serial: parsed.serial.toUpperCase(),
+        device_type: parsed.deviceType,
+        security_code: parsed.securityCode,
+        ...(!String(prev.name || '').trim() ? { name: parsed.label } : {}),
+      }));
+      setError(null);
+      setQrScannerOpen(false);
+      toast.success(`Scanned ${parsed.deviceType || 'camera'} · ${parsed.serial}`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not parse QR');
+    }
+  }, []);
 
   const validateStep = useCallback((id: StepId): string | null => {
     if (id === 'identity') {
@@ -408,6 +432,13 @@ export const CameraSetupWizard: React.FC<Props> = ({ open, busy, onClose, onSubm
           )}
         </footer>
       </div>
+
+      <DahuaQrScanner
+        open={qrScannerOpen}
+        onClose={() => setQrScannerOpen(false)}
+        onScan={applyQrScan}
+        title="Scan Dahua camera label"
+      />
     </div>
   );
 };

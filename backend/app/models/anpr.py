@@ -31,6 +31,8 @@ class ANPRDetection(Base):
     t_enter_sec   = Column(Float, nullable=True)
     t_exit_sec    = Column(Float, nullable=True)
     duration_sec  = Column(Float, nullable=True)
+    # Shop presence timer (Live/Paused/Done) — authoritative show duration
+    presence_duration_sec = Column(Float, nullable=True)
 
     # Relationships
     vehicle = relationship("Vehicle", foreign_keys=[vehicle_id])

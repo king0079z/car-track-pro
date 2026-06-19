@@ -102,6 +102,7 @@ def _det_dict(d: ANPRDetection) -> dict:
         "t_enter_sec": d.t_enter_sec,
         "t_exit_sec":  d.t_exit_sec,
         "duration_sec": d.duration_sec,
+        "presence_duration_sec": d.presence_duration_sec,
         "suggested_bay": bay_info.get("bay"),
         "camera_name": bay_info.get("camera_name"),
         "camera_slot": bay_info.get("slot_index"),
@@ -138,8 +139,10 @@ def sync_detections(
             saved.append(_det_dict(existing))
             continue
 
-        # Try to link to an existing vehicle
-        vehicle = db.query(Vehicle).filter(Vehicle.plate_number == plate).first()
+        # Try to link to an existing vehicle (fuzzy: OCR drift still links)
+        from ..services.vehicle_identity import find_vehicle_for_plate
+
+        vehicle = find_vehicle_for_plate(db, plate, fuzzy=True)
 
         row = ANPRDetection(
             plate=plate,
@@ -168,7 +171,7 @@ def recent_detections(
     limit: int = Query(default=30, le=200),
     job_id: Optional[str] = Query(default=None),
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_page("visionflow")),
+    current_user: User = Depends(require_any_page("dashboard", "visionflow")),
 ):
     """Last `limit` ANPR detections ordered newest-first, with vehicle/visit info.
     Optionally filter by job_id to fetch all detections for one VisionFlow job.
@@ -279,6 +282,117 @@ def anpr_stats(
     }
 
 
+def _plate_shop_seconds(segments: list[dict]) -> tuple[float, float]:
+    """Return (presence_total, in_frame_total) for a plate's detection segments."""
+    presence_vals = [
+        float(s["presence_duration_sec"])
+        for s in segments
+        if s.get("presence_duration_sec") is not None
+    ]
+    if presence_vals:
+        total_presence = max(presence_vals)
+    else:
+        total_presence = sum(float(s.get("duration_sec") or 0.0) for s in segments)
+    total_dwell = sum(float(s.get("duration_sec") or 0.0) for s in segments)
+    return round(total_presence, 3), round(total_dwell, 3)
+
+
+@router.get("/summary")
+def anpr_plate_summary(
+    limit_plates: int = Query(default=50, le=100),
+    lookback_days: int = Query(default=7, ge=1, le=30),
+    segment_limit: int = Query(default=500, le=2000),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_any_page("dashboard", "visionflow")),
+):
+    """
+    Dashboard feed — detections grouped by plate with shop duration totals and
+    expandable segment history (Camera wall / ANPR & Speed sync).
+    """
+    since = datetime.now(UTC) - timedelta(days=lookback_days)
+    rows = (
+        db.query(ANPRDetection)
+        .options(
+            joinedload(ANPRDetection.vehicle),
+            joinedload(ANPRDetection.visit),
+        )
+        .filter(ANPRDetection.detected_at >= since)
+        .order_by(ANPRDetection.detected_at.desc())
+        .limit(segment_limit)
+        .all()
+    )
+
+    groups: dict[str, dict] = {}
+    for row in rows:
+        plate = (row.plate or "").strip().upper()
+        if not plate:
+            continue
+        seg = _det_dict(row)
+        bucket = groups.get(plate)
+        if bucket is None:
+            bucket = {
+                "plate": plate,
+                "segments": [],
+                "latest_at": seg.get("detected_at"),
+                "latest_job_id": seg.get("job_id"),
+                "camera_name": seg.get("camera_name"),
+                "camera_slot": seg.get("camera_slot"),
+                "vehicle": seg.get("vehicle"),
+                "visit_id": seg.get("visit_id"),
+                "max_speed_kmh": seg.get("speed_kmh"),
+            }
+            groups[plate] = bucket
+        bucket["segments"].append(seg)
+        spd = seg.get("speed_kmh")
+        if spd is not None:
+            prev = bucket.get("max_speed_kmh")
+            bucket["max_speed_kmh"] = max(float(prev or 0), float(spd)) or spd
+        if seg.get("vehicle") and not bucket.get("vehicle"):
+            bucket["vehicle"] = seg["vehicle"]
+        if seg.get("visit_id") and not bucket.get("visit_id"):
+            bucket["visit_id"] = seg["visit_id"]
+        if seg.get("detected_at") and (
+            not bucket.get("latest_at") or seg["detected_at"] > bucket["latest_at"]
+        ):
+            bucket["latest_at"] = seg["detected_at"]
+            bucket["latest_job_id"] = seg.get("job_id")
+            bucket["camera_name"] = seg.get("camera_name")
+            bucket["camera_slot"] = seg.get("camera_slot")
+
+    plates_out: list[dict] = []
+    for plate, bucket in groups.items():
+        segs = sorted(
+            bucket["segments"],
+            key=lambda s: s.get("detected_at") or "",
+            reverse=True,
+        )
+        total_presence, total_dwell = _plate_shop_seconds(segs)
+        plates_out.append({
+            "plate": plate,
+            "segment_count": len(segs),
+            "total_presence_sec": total_presence,
+            "total_duration_sec": total_dwell,
+            "latest_at": bucket.get("latest_at"),
+            "latest_job_id": bucket.get("latest_job_id"),
+            "camera_name": bucket.get("camera_name"),
+            "camera_slot": bucket.get("camera_slot"),
+            "max_speed_kmh": bucket.get("max_speed_kmh"),
+            "vehicle": bucket.get("vehicle"),
+            "visit_id": bucket.get("visit_id"),
+            "segments": segs,
+        })
+
+    plates_out.sort(key=lambda p: p.get("latest_at") or "", reverse=True)
+    total_segments = sum(p["segment_count"] for p in plates_out)
+
+    return {
+        "lookback_days": lookback_days,
+        "total_plates": len(plates_out),
+        "total_segments": total_segments,
+        "plates": plates_out[:limit_plates],
+    }
+
+
 @router.post("/{detection_id}/visit", status_code=201)
 def create_visit_from_detection(
     detection_id: int,
@@ -296,8 +410,11 @@ def create_visit_from_detection(
 
     plate = det.plate.upper()
 
-    # Get or create vehicle
-    vehicle = db.query(Vehicle).filter(Vehicle.plate_number == plate).first()
+    # Get or create vehicle — fuzzy match folds OCR misreads onto the
+    # existing record instead of creating a duplicate vehicle row.
+    from ..services.vehicle_identity import find_vehicle_for_plate
+
+    vehicle = find_vehicle_for_plate(db, plate, fuzzy=True)
     if not vehicle:
         vehicle = Vehicle(
             plate_number=plate,

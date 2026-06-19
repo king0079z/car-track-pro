@@ -78,6 +78,16 @@ def register_cloud_source(source: str, *, allow_hd: bool = True) -> None:
         st.allow_hd = bool(allow_hd)
 
 
+def register_relay_source(source: str) -> None:
+    """P2P/Easy4IP relay tunnel — one RTSP client only; no idle/tier reconnect churn."""
+    if not source:
+        return
+    st = _get(source)
+    with _LOCK:
+        st.adaptive = False
+        st.last_detection = time.monotonic()
+
+
 def is_adaptive(source: str) -> bool:
     if not _saver_enabled():
         return False
@@ -104,14 +114,23 @@ def active_tier(source: str) -> str:
 
 def preferred_tier(source: str) -> str:
     """Tier the next (re)connect should use. SD is the quota-friendly default;
-    HD only while a close vehicle was seen recently and the camera allows it."""
+    HD while a vehicle was seen recently, someone is watching the camera wall
+    (ANPR needs readable pixels), or during the post-start warmup window."""
     if not _saver_enabled() or not bool(getattr(settings, "STREAM_HYBRID_ENABLED", True)):
         return _TIER_HD  # legacy behaviour: camera config decides via prefer_hd
     st = _get(source)
     hold = max(10.0, float(getattr(settings, "STREAM_HD_HOLD_SEC", 90.0)))
+    warmup = max(60.0, float(getattr(settings, "STREAM_ANPR_WARMUP_HD_SEC", 180.0)))
     with _LOCK:
         if not st.allow_hd:
             return _TIER_SD
+        # Camera wall open → use main stream so YOLO/OCR match uploaded-video quality.
+        if st.last_viewer and (time.monotonic() - st.last_viewer) <= max(
+            5.0, float(getattr(settings, "LIVE_VIEWER_HOLD_SEC", 45.0))
+        ):
+            return _TIER_HD
+        if (time.monotonic() - st.registered_at) <= warmup:
+            return _TIER_HD
         if st.last_close_detection and (time.monotonic() - st.last_close_detection) <= hold:
             return _TIER_HD
         return _TIER_SD
@@ -162,6 +181,21 @@ def note_viewer(source: str) -> None:
         st.last_viewer = time.monotonic()
 
 
+def boost_anpr_session(source: str, *, allow_hd: bool = True) -> None:
+    """Grid start / camera-wall open: force HD warmup and treat as active ANPR."""
+    if not source:
+        return
+    st = _get(source)
+    now = time.monotonic()
+    with _LOCK:
+        st.adaptive = True
+        st.allow_hd = bool(allow_hd)
+        st.registered_at = now
+        st.last_viewer = now
+        st.last_detection = now
+        st.idle = False
+
+
 def has_recent_viewer(source: str) -> bool:
     st = _get(source)
     hold = max(5.0, float(getattr(settings, "LIVE_VIEWER_HOLD_SEC", 45.0)))
@@ -179,6 +213,12 @@ def should_idle(source: str) -> bool:
         return False
     if has_recent_viewer(source):
         return False
+    # SD sub-stream: keep full-frame ANPR running (no 2–5 min power-save gaps).
+    if not bool(getattr(settings, "LIVE_IDLE_ON_SD", False)):
+        st = _get(source)
+        with _LOCK:
+            if st.active_tier == _TIER_SD:
+                return False
     st = _get(source)
     after = max(30.0, float(getattr(settings, "LIVE_IDLE_AFTER_SEC", 240.0)))
     with _LOCK:

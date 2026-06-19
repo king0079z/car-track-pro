@@ -26,7 +26,17 @@ import { getHomeRoute } from './lib/permissions';
 
 const queryClient = new QueryClient({
   defaultOptions: {
-    queries: { staleTime: 5000, retry: 1 },
+    queries: {
+      staleTime: 5000,
+      retry: (failureCount, error) => {
+        const status = (error as { response?: { status?: number } })?.response?.status;
+        if (status === 401 || status === 403) return false;
+        if (status != null && status >= 500) return failureCount < 3;
+        return failureCount < 1;
+      },
+      refetchOnWindowFocus: true,
+      refetchOnReconnect: true,
+    },
   },
 });
 

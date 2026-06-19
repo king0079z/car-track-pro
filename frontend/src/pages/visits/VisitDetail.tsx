@@ -5,9 +5,9 @@ import {
   ArrowLeft, Car, Clock, DollarSign, User, CheckCircle, Edit,
   LogOut, Play, Square, Plus, X, Wrench, Camera, Calendar, Printer,
   FileText, Phone, Mail, PenLine, TrendingUp, BarChart3, Wallet,
-  ChevronRight, ScanLine, MessageCircle,
+  ChevronRight, ScanLine, MessageCircle, Loader2, Send,
 } from 'lucide-react';
-import { visitsApi, usersApi, servicesApi, vehiclesApi, API_BASE_URL } from '../../services/api';
+import { visitsApi, usersApi, servicesApi, vehiclesApi, settingsApi, API_BASE_URL } from '../../services/api';
 import {
   fmtQatar,
   fmtQatarDateLong,
@@ -23,6 +23,7 @@ import {
 } from 'recharts';
 import toast from 'react-hot-toast';
 import type { Visit, ServiceItem, Service } from '../../types';
+import { visitShopDurationMinutes, isActiveVisitStatus } from '../../utils/visitDuration';
 
 const STATUS_CFG: Record<string, { label: string }> = {
   waiting:    { label: 'Waiting' },
@@ -80,6 +81,22 @@ function paymentStyle(status?: string): { bg: string; color: string; border: str
   if (s === 'partial' || s === 'partially_paid')
     return { bg: 'rgba(245,158,11,0.12)', color: 'var(--text-warning)', border: 'rgba(245,158,11,0.35)', label: 'Partial' };
   return { bg: 'rgba(251,191,36,0.1)', color: 'var(--text-warning)', border: 'rgba(251,191,36,0.3)', label: 'Unpaid' };
+}
+
+function serviceItemDuration(item: ServiceItem): string {
+  if (item.actual_duration_minutes != null && item.actual_duration_minutes > 0) {
+    return fmtDur(item.actual_duration_minutes);
+  }
+  if (item.started_at && item.completed_at) {
+    const mins = Math.max(1, Math.round(
+      (new Date(item.completed_at).getTime() - new Date(item.started_at).getTime()) / 60000,
+    ));
+    return fmtDur(mins);
+  }
+  if (item.service?.estimated_duration_minutes) {
+    return `~${fmtDur(item.service.estimated_duration_minutes)} est.`;
+  }
+  return '—';
 }
 
 function PrintSection({ title, children }: { title: string; children: React.ReactNode }) {
@@ -149,11 +166,20 @@ export const VisitDetail: React.FC = () => {
         window.print();
         searchParams.delete('print');
         setSearchParams(searchParams, { replace: true });
-      }, 600);
+      }, 1200);
       return () => clearTimeout(t);
     }
     return undefined;
   }, [visit, searchParams, setSearchParams]);
+
+  const { data: shopSettings } = useQuery({
+    queryKey: ['settings-public'],
+    queryFn: () => settingsApi.public().then(r => r.data as {
+      business_name?: string;
+      whatsapp_ready?: boolean;
+      whatsapp_dry_run?: boolean;
+    }),
+  });
 
   const { data: users = [] } = useQuery({
     queryKey: ['users'],
@@ -241,8 +267,28 @@ export const VisitDetail: React.FC = () => {
       qc.invalidateQueries({ queryKey: ['visit', id] });
       qc.invalidateQueries({ queryKey: ['visits', 'vehicle-analytics'] });
       qc.invalidateQueries({ queryKey: ['services'] });
+      navigate(`/visits/${id}?print=1`, { replace: true });
     },
     onError: () => toast.error('Checkout failed'),
+  });
+
+  const resendWhatsappMutation = useMutation({
+    mutationFn: () => visitsApi.resendWhatsapp(Number(id)),
+    onSuccess: (res) => {
+      const data = res.data as { phone?: string; dry_run?: boolean };
+      if (data.dry_run) {
+        toast.success(`WhatsApp dry-run OK (logged on server) → +${data.phone || 'customer'}`);
+      } else {
+        toast.success(data.phone ? `WhatsApp receipt sent to +${data.phone}` : 'WhatsApp receipt sent to customer');
+      }
+      qc.invalidateQueries({ queryKey: ['visit', id] });
+    },
+    onError: (e: unknown) => {
+      const err = e as { response?: { data?: { detail?: string | { msg?: string }[] } } };
+      const d = err?.response?.data?.detail;
+      const msg = typeof d === 'string' ? d : Array.isArray(d) ? d.map(x => x?.msg || String(x)).join(', ') : 'Could not send WhatsApp';
+      toast.error(msg, { duration: 6000 });
+    },
   });
 
   const fixPlateMutation = useMutation({
@@ -337,8 +383,14 @@ export const VisitDetail: React.FC = () => {
   if (!visit) return null;
 
   const cfg = STATUS_CFG[visit.status] || STATUS_CFG.waiting;
-  const isActive = ['waiting', 'in_service', 'on_hold'].includes(visit.status);
+  const isActive = isActiveVisitStatus(visit.status);
   const liveMinutes = Math.floor((Date.now() - new Date(visit.entry_time).getTime()) / 60000);
+  const effectiveShopMinutes = visitShopDurationMinutes(visit) ?? (isActive ? liveMinutes : null);
+  const durationLabel =
+    effectiveShopMinutes != null
+      ? `${fmtDur(effectiveShopMinutes)}${isActive && visit.anpr_camera_seconds == null ? ' ⟳' : ''}`
+      : '—';
+
   const sigRaw = (visit.supervisor_signature || visit.customer_signature)?.trim();
   const signatureSrc = sigRaw
     ? (sigRaw.startsWith('data:') || /^https?:\/\//i.test(sigRaw)
@@ -349,23 +401,55 @@ export const VisitDetail: React.FC = () => {
   const printPlateImg = resolveMediaUrl(visit.plate_image_url);
   const printCamImg = resolveMediaUrl(visit.entry_camera_snapshot);
   const payStyle = paymentStyle(visit.payment_status);
-  const durationLabel = visit.duration_minutes
-    ? fmtDur(visit.duration_minutes)
-    : (isActive ? `${fmtDur(liveMinutes)} ⟳` : '—');
+
+  const printBusinessName = shopSettings?.business_name || 'CarTrack Pro';
+  const printCompleted = visit.status === 'completed';
+  const printServiceDurationTotal = (visit.service_items ?? []).reduce((sum: number, item: ServiceItem) => {
+    if (item.actual_duration_minutes) return sum + item.actual_duration_minutes;
+    if (item.started_at && item.completed_at) {
+      return sum + Math.max(1, Math.round(
+        (new Date(item.completed_at).getTime() - new Date(item.started_at).getTime()) / 60000,
+      ));
+    }
+    return sum + (item.service?.estimated_duration_minutes ?? 0);
+  }, 0);
+
+  const customerWhatsAppPhone = (visit.customer_phone || visit.vehicle?.owner_phone || '').trim();
+  const whatsappReady = shopSettings?.whatsapp_ready !== false;
+  const whatsappDryRun = Boolean(shopSettings?.whatsapp_dry_run);
+  const canSendWhatsapp = visit.status === 'completed' && Boolean(customerWhatsAppPhone) && whatsappReady;
+
+  const sendWhatsappCompletion = () => {
+    if (visit.status !== 'completed') {
+      toast.error('Complete the work order before sending WhatsApp');
+      return;
+    }
+    if (!customerWhatsAppPhone) {
+      toast.error('Add a customer phone number on this work order first');
+      return;
+    }
+    if (visit.whatsapp_notified_at && !window.confirm('WhatsApp was already sent. Send the completion receipt again?')) {
+      return;
+    }
+    resendWhatsappMutation.mutate();
+  };
 
   return (
     <>
       <style>{`
         @keyframes pulse { 0%,100%{opacity:1}50%{opacity:0.3} }
         @media print {
-          .visit-detail-no-print { display: none !important; }
-          .visit-detail-print-only { display: block !important; }
           .sidebar,
-          .app-main > div:first-of-type { display: none !important; }
+          .sidebar-overlay,
+          .desktop-topbar,
+          .mobile-topbar,
+          .visit-detail-no-print { display: none !important; }
+          .visit-detail-print-only { display: block !important; visibility: visible !important; }
+          .app-layout { display: block !important; }
           .app-main { margin: 0 !important; padding: 0 !important; width: 100% !important; }
-          .page-container { padding: 0 !important; max-width: none !important; }
+          .page-container { padding: 0 !important; max-width: none !important; display: block !important; visibility: visible !important; }
           body { background: #fff !important; }
-          @page { margin: 11mm 12mm; size: auto; }
+          @page { margin: 10mm 12mm; size: A4; }
         }
         .visit-detail-print-only { display: none; }
       `}</style>
@@ -381,6 +465,22 @@ export const VisitDetail: React.FC = () => {
           <button className="btn btn-ghost btn-sm" onClick={() => window.print()} title="Print work order">
             <Printer size={13} /> Print
           </button>
+          {canSendWhatsapp && (
+            <button
+              type="button"
+              className="btn btn-sm vd-whatsapp-btn"
+              onClick={sendWhatsappCompletion}
+              disabled={resendWhatsappMutation.isPending}
+              title={`Send completion receipt to ${customerWhatsAppPhone} via WhatsApp`}
+            >
+              {resendWhatsappMutation.isPending ? (
+                <Loader2 size={13} className="spin" />
+              ) : (
+                <MessageCircle size={13} />
+              )}
+              {visit.whatsapp_notified_at ? 'Resend WhatsApp' : 'Send WhatsApp'}
+            </button>
+          )}
           {isActive && (
             <>
               <button className="btn btn-secondary btn-sm" onClick={() => setShowStatusModal(true)}>
@@ -431,9 +531,6 @@ export const VisitDetail: React.FC = () => {
                 <span title={`WhatsApp sent ${fmtQatar(visit.whatsapp_notified_at, 'full')}`}>
                   <MessageCircle size={12} color="#25D366" /> WhatsApp sent
                 </span>
-              )}
-              {visit.status === 'completed' && !visit.whatsapp_notified_at && (visit.customer_phone || visit.vehicle?.owner_phone) && (
-                <span style={{ opacity: 0.75 }}><MessageCircle size={12} /> WhatsApp pending / not configured</span>
               )}
               {visit.created_by_user && <span><Camera size={12} /> Opened by {visit.created_by_user.full_name}</span>}
               {visit.anpr_camera_name && <span><ScanLine size={12} /> {visit.anpr_camera_name}</span>}
@@ -552,6 +649,51 @@ export const VisitDetail: React.FC = () => {
               <div className="vd-facts-notes"><dt>Notes</dt><dd>{visit.notes}</dd></div>
             )}
           </dl>
+
+          <div className="vd-whatsapp-card">
+            <div className="vd-panel-title small">
+              <MessageCircle size={14} /> Customer WhatsApp
+            </div>
+            {customerWhatsAppPhone ? (
+              <p className="vd-whatsapp-phone">
+                <Phone size={12} /> {customerWhatsAppPhone}
+              </p>
+            ) : (
+              <p className="vd-whatsapp-hint">No phone on file — add customer phone on the vehicle profile or work order.</p>
+            )}
+            {!whatsappReady && (
+              <p className="vd-whatsapp-warn">
+                WhatsApp is not configured on the server. Add <code>WHATSAPP_ENABLED</code>, <code>WHATSAPP_ACCESS_TOKEN</code>, and <code>WHATSAPP_PHONE_NUMBER_ID</code> to backend <code>.env</code>, or set <code>WHATSAPP_DRY_RUN=true</code> for local testing.
+              </p>
+            )}
+            {whatsappDryRun && (
+              <p className="vd-whatsapp-dry">Dry-run mode — message is logged on the server, not sent to Meta.</p>
+            )}
+            {visit.status !== 'completed' ? (
+              <p className="vd-whatsapp-hint">Complete checkout to send the work order completion receipt.</p>
+            ) : (
+              <>
+                {visit.whatsapp_notified_at && (
+                  <p className="vd-whatsapp-sent">
+                    <CheckCircle size={12} /> Sent {fmtQatar(visit.whatsapp_notified_at, 'dmyHm')}
+                  </p>
+                )}
+                <button
+                  type="button"
+                  className="btn btn-sm vd-whatsapp-send"
+                  onClick={sendWhatsappCompletion}
+                  disabled={!customerWhatsAppPhone || !whatsappReady || resendWhatsappMutation.isPending}
+                >
+                  {resendWhatsappMutation.isPending ? (
+                    <><Loader2 size={14} className="spin" /> Sending…</>
+                  ) : (
+                    <><Send size={14} /> {visit.whatsapp_notified_at ? 'Resend completion receipt' : 'Send completion to WhatsApp'}</>
+                  )}
+                </button>
+              </>
+            )}
+          </div>
+
           <div className="vd-signature-block">
             <div className="vd-panel-title small"><PenLine size={14} /> Supervisor sign-off</div>
             {signatureSrc ? (
@@ -950,12 +1092,45 @@ export const VisitDetail: React.FC = () => {
         padding: '22px 26px',
         borderRadius: 0,
       }}>
-        <div style={{ fontSize: 9, letterSpacing: '0.22em', textTransform: 'uppercase', opacity: 0.88 }}>CarTrack Pro</div>
-        <h1 style={{ margin: '10px 0 0', fontSize: 26, fontWeight: 800, letterSpacing: '-0.03em' }}>Work order report</h1>
+        <div style={{ fontSize: 9, letterSpacing: '0.22em', textTransform: 'uppercase', opacity: 0.88 }}>{printBusinessName}</div>
+        <h1 style={{ margin: '10px 0 0', fontSize: 26, fontWeight: 800, letterSpacing: '-0.03em' }}>
+          {printCompleted ? 'Work order completion report' : 'Work order report'}
+        </h1>
         <p style={{ margin: '10px 0 0', fontSize: 11, opacity: 0.92 }}>
-          {`${fmtQatarDateLong()} · ${fmtQatar(new Date(), 'hm')}`}
+          {visit.visit_number} · {`${fmtQatarDateLong()} · ${fmtQatar(new Date(), 'hm')}`}
         </p>
+        {printCompleted && effectiveShopMinutes != null && (
+          <div style={{
+            marginTop: 14, display: 'inline-block', padding: '8px 14px',
+            background: 'rgba(255,255,255,0.16)', borderRadius: 8, fontSize: 12, fontWeight: 800,
+          }}>
+            Total time in shop: {fmtDur(effectiveShopMinutes)}
+          </div>
+        )}
       </header>
+
+      <PrintSection title="Time & duration">
+        <div style={{
+          display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10,
+          marginBottom: 12,
+        }}>
+          {[
+            { label: 'Arrived', value: fmtQatar(visit.entry_time, 'pp') },
+            { label: 'Completed', value: visit.exit_time ? fmtQatar(visit.exit_time, 'pp') : (isActive ? 'In progress' : '—') },
+            { label: 'Shop duration', value: effectiveShopMinutes != null ? fmtDur(effectiveShopMinutes) : '—' },
+          ].map(box => (
+            <div key={box.label} style={{ padding: 12, background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 8 }}>
+              <div style={{ fontSize: 8, fontWeight: 800, letterSpacing: '0.1em', color: '#64748b', textTransform: 'uppercase' }}>{box.label}</div>
+              <div style={{ fontSize: 12, fontWeight: 800, marginTop: 6, color: '#0f172a' }}>{box.value}</div>
+            </div>
+          ))}
+        </div>
+        {printServiceDurationTotal > 0 && (
+          <div style={{ fontSize: 10, color: '#475569' }}>
+            Service time (est./actual): <strong>{fmtDur(printServiceDurationTotal)}</strong>
+          </div>
+        )}
+      </PrintSection>
 
       <PrintSection title="Visit & vehicle">
         <table style={{ width: '100%', borderCollapse: 'collapse' }}>
@@ -973,7 +1148,7 @@ export const VisitDetail: React.FC = () => {
               ...(visit.anpr_camera_seconds != null && visit.anpr_camera_seconds > 0
                 ? [['ANPR camera track', fmtCamSec(visit.anpr_camera_seconds)] as [string, string]]
                 : []),
-              ['Duration', visit.duration_minutes != null ? fmtDur(visit.duration_minutes) : (isActive ? `${fmtDur(liveMinutes)} (in progress)` : '—')],
+              ['Duration', effectiveShopMinutes != null ? fmtDur(effectiveShopMinutes) : '—'],
               ['Logged by', visit.created_by_user?.full_name ?? '—'],
             ].map(([k, v]) => (
               <tr key={String(k)} style={{ borderBottom: '1px solid #e2e8f0' }}>
@@ -1024,20 +1199,21 @@ export const VisitDetail: React.FC = () => {
         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 10 }}>
           <thead>
             <tr style={{ background: '#f1f5f9' }}>
-              {['Service', 'Category', 'Staff', 'Line status', 'QAR'].map(h => (
+              {['Service', 'Category', 'Staff', 'Duration', 'Line status', 'QAR'].map(h => (
                 <th key={h} style={{ textAlign: h === 'QAR' ? 'right' : 'left', padding: '8px 10px', borderBottom: '2px solid #cbd5e1', fontSize: 8, letterSpacing: '0.08em', textTransform: 'uppercase', color: '#475569' }}>{h}</th>
               ))}
             </tr>
           </thead>
           <tbody>
             {(visit.service_items ?? []).length === 0 ? (
-              <tr><td colSpan={5} style={{ padding: 12, color: '#64748b' }}>No line items</td></tr>
+              <tr><td colSpan={6} style={{ padding: 12, color: '#64748b' }}>No line items</td></tr>
             ) : (
               visit.service_items!.map((item: ServiceItem) => (
                 <tr key={item.id} style={{ borderBottom: '1px solid #e2e8f0' }}>
                   <td style={{ padding: '8px 10px', fontWeight: 700 }}>{item.service?.name ?? '—'}</td>
                   <td style={{ padding: '8px 10px', textTransform: 'capitalize', color: '#475569' }}>{item.service?.category ?? '—'}</td>
                   <td style={{ padding: '8px 10px' }}>{item.assigned_staff?.full_name ?? '—'}</td>
+                  <td style={{ padding: '8px 10px', fontWeight: 700, color: '#334155' }}>{serviceItemDuration(item)}</td>
                   <td style={{ padding: '8px 10px' }}>{SVC_STATUS[item.status]?.label ?? item.status}</td>
                   <td style={{ padding: '8px 10px', textAlign: 'right', fontWeight: 900, fontFamily: 'ui-monospace, monospace', color: '#5b21b6' }}>{(item.price ?? 0).toLocaleString()}</td>
                 </tr>
@@ -1104,7 +1280,7 @@ export const VisitDetail: React.FC = () => {
         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 9.5 }}>
           <thead>
             <tr style={{ background: '#1e293b', color: '#fff' }}>
-              {['Visit #', 'Date & time', 'Status', 'Payment', 'Amount (QAR)'].map(h => (
+              {['Visit #', 'Date & time', 'Status', 'Duration', 'Payment', 'Amount (QAR)'].map(h => (
                 <th key={h} style={{
                   textAlign: h.includes('Amount') ? 'right' : 'left',
                   padding: '9px 10px',
@@ -1134,6 +1310,7 @@ export const VisitDetail: React.FC = () => {
                   </td>
                   <td style={{ padding: '8px 10px', whiteSpace: 'nowrap' }}>{fmtQatar(v.entry_time, 'dmyHm')}</td>
                   <td style={{ padding: '8px 10px' }}>{STATUS_CFG[String(v.status)]?.label ?? v.status}</td>
+                  <td style={{ padding: '8px 10px' }}>{v.duration_minutes != null ? fmtDur(v.duration_minutes) : '—'}</td>
                   <td style={{ padding: '8px 10px' }}>
                     <span style={{
                       display: 'inline-block',
@@ -1166,7 +1343,7 @@ export const VisitDetail: React.FC = () => {
         color: '#94a3b8',
         textAlign: 'center',
       }}>
-        CarTrack Pro · Visit documentation · Confidential
+        {printBusinessName} · Work order documentation · Confidential
       </footer>
     </div>
     </>

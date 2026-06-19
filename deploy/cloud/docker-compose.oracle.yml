@@ -20,6 +20,7 @@ services:
       dockerfile: Dockerfile
     container_name: cartrack_backend
     restart: always
+    stop_grace_period: 30s
     env_file:
       - .env.cloud
     environment:
@@ -66,7 +67,8 @@ services:
       - caddy_data:/data
       - caddy_config:/config
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
     networks:
       - cartrack_net
 

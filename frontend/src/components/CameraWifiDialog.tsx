@@ -30,7 +30,9 @@ export const CameraWifiDialog: React.FC<{
   cameraName: string;
   isOpen: boolean;
   onClose: () => void;
-}> = ({ cameraId, cameraName, isOpen, onClose }) => {
+  /** When true, render panel body only (inside CameraChangeWifiDialog). */
+  embedded?: boolean;
+}> = ({ cameraId, cameraName, isOpen, onClose, embedded = false }) => {
   const [current, setCurrent] = useState<string | null>(null);
   const [loadingCurrent, setLoadingCurrent] = useState(false);
   const [networks, setNetworks] = useState<WifiNetwork[]>([]);
@@ -39,6 +41,8 @@ export const CameraWifiDialog: React.FC<{
   const [bssid, setBssid] = useState('');
   const [password, setPassword] = useState('');
   const [switching, setSwitching] = useState(false);
+  const [scanCooldown, setScanCooldown] = useState(0);
+  const [imouUsage, setImouUsage] = useState<string | null>(null);
 
   const loadCurrent = useCallback(async () => {
     setLoadingCurrent(true);
@@ -54,8 +58,16 @@ export const CameraWifiDialog: React.FC<{
 
   useEffect(() => {
     if (!isOpen) return;
-    setNetworks([]); setSsid(''); setBssid(''); setPassword('');
+    setNetworks([]); setSsid(''); setBssid(''); setPassword(''); setScanCooldown(0);
     void loadCurrent();
+    void camerasApi.imouUsage().then(r => {
+      const u = r.data;
+      if (u.blocked) {
+        setImouUsage(u.recovery || 'Imou API quota blocked — wait before scanning.');
+      } else {
+        setImouUsage(null);
+      }
+    }).catch(() => setImouUsage(null));
   }, [isOpen, loadCurrent]);
 
   useEffect(() => {
@@ -65,12 +77,24 @@ export const CameraWifiDialog: React.FC<{
   }, [isOpen, onClose]);
 
   const scan = async () => {
+    if (scanCooldown > 0) {
+      toast(`Wi‑Fi scan cached — wait ${scanCooldown}s before scanning again`, { icon: '⏳' });
+      return;
+    }
     setScanning(true);
     try {
       const { data } = await camerasApi.wifiScan(cameraId);
       if (data.ok) {
         setNetworks(data.networks ?? []);
-        if (!data.networks?.length) toast('No networks found near the camera', { icon: 'i' });
+        if (data.cached) {
+          const wait = data.retry_after_sec ?? 300;
+          setScanCooldown(wait);
+          toast(`Showing cached scan (saves Imou quota). Retry in ${wait}s`, { icon: 'ℹ️', duration: 6000 });
+        } else if (!data.networks?.length) {
+          toast('No networks found near the camera', { icon: 'ℹ️' });
+        } else {
+          setScanCooldown(300);
+        }
       } else {
         toast.error(data.error || 'Wi-Fi scan failed', { duration: 7000 });
       }
@@ -109,25 +133,33 @@ export const CameraWifiDialog: React.FC<{
 
   if (!isOpen) return null;
 
-  return (
-    <div
-      style={{ position: 'fixed', inset: 0, zIndex: 60, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16, background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(3px)' }}
-      onClick={onClose}
-    >
-      <div
-        onClick={e => e.stopPropagation()}
-        style={{ width: '100%', maxWidth: 460, maxHeight: '88vh', overflowY: 'auto', borderRadius: 16, border: '1px solid var(--border-light)', background: 'var(--bg-elevated)', boxShadow: '0 20px 60px rgba(0,0,0,0.4)' }}
-      >
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '16px 18px', borderBottom: '1px solid var(--border-light)' }}>
+  const body = (
+    <>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: embedded ? '12px 18px 0' : '16px 18px', borderBottom: embedded ? 'none' : '1px solid var(--border-light)' }}>
+          {!embedded && (
           <div style={{ display: 'flex', alignItems: 'center', gap: 9, fontSize: 15, fontWeight: 800 }}>
             <Wifi size={18} color="#3b82f6" /> Camera Wi-Fi — {cameraName}
           </div>
+          )}
+          {!embedded && (
           <button type="button" onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)' }}>
             <X size={18} />
           </button>
+          )}
         </div>
 
-        <div style={{ padding: '16px 18px', display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <div style={{ padding: embedded ? '8px 18px 16px' : '16px 18px', display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <div style={{ fontSize: 12.5, color: 'var(--text-secondary)', lineHeight: 1.55 }}>
+            Scans Wi-Fi networks <strong>near the camera</strong> via Imou cloud (not your PC&apos;s Wi-Fi).
+            Scans are <strong>cached 5 minutes</strong> to protect your monthly API quota (~30k free calls/app).
+            Prefer <strong>CarTrack Cloud</strong> for daily video — it uses zero Imou API calls.
+          </div>
+          {imouUsage && (
+            <div style={{ fontSize: 12, color: '#f59e0b', background: 'rgba(245,158,11,0.1)', borderRadius: 8, padding: '8px 10px' }}>
+              {imouUsage}
+            </div>
+          )}
+
           <div style={{ fontSize: 12.5, color: 'var(--text-secondary)' }}>
             Currently on:{' '}
             <strong style={{ color: 'var(--text-primary)' }}>
@@ -135,10 +167,10 @@ export const CameraWifiDialog: React.FC<{
             </strong>
           </div>
 
-          <button type="button" className="btn btn-secondary" disabled={scanning} onClick={() => void scan()}
+          <button type="button" className="btn btn-secondary" disabled={scanning || scanCooldown > 0} onClick={() => void scan()}
             style={{ fontSize: 13, display: 'inline-flex', alignItems: 'center', gap: 7, alignSelf: 'flex-start' }}>
             {scanning ? <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> : <RefreshCw size={14} />}
-            {scanning ? 'Scanning camera surroundings…' : 'Scan nearby networks'}
+            {scanning ? 'Scanning camera surroundings…' : scanCooldown > 0 ? `Scan again in ${scanCooldown}s` : 'Scan nearby networks'}
           </button>
 
           {networks.length > 0 && (
@@ -170,7 +202,7 @@ export const CameraWifiDialog: React.FC<{
             <AlertTriangle size={15} color="#f59e0b" style={{ flexShrink: 0, marginTop: 1 }} />
             <span>
               The camera reboots onto the new Wi-Fi (offline up to ~2 min). Use the <strong>2.4 GHz</strong> band and the
-              correct password — a wrong network drops it off the cloud and needs DMSS / Imou Life (local pairing) to recover.
+              correct password — a wrong network drops it off the cloud; use the <strong>On-site (Soft AP)</strong> tab to recover.
             </span>
           </div>
 
@@ -183,6 +215,21 @@ export const CameraWifiDialog: React.FC<{
             </button>
           </div>
         </div>
+    </>
+  );
+
+  if (embedded) return body;
+
+  return (
+    <div
+      style={{ position: 'fixed', inset: 0, zIndex: 60, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16, background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(3px)' }}
+      onClick={onClose}
+    >
+      <div
+        onClick={e => e.stopPropagation()}
+        style={{ width: '100%', maxWidth: 460, maxHeight: '88vh', overflowY: 'auto', borderRadius: 16, border: '1px solid var(--border-light)', background: 'var(--bg-elevated)', boxShadow: '0 20px 60px rgba(0,0,0,0.4)' }}
+      >
+        {body}
       </div>
     </div>
   );

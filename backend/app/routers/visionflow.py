@@ -166,22 +166,33 @@ def _disable_stale_always_on_sessions(
 
 
 def _multi_cam_pipeline_opts(**overrides) -> dict:
-    """Lighter defaults when up to four live analysis feeds run in parallel."""
+    """Live camera-wall pipeline — tuned for ANPR (matches upload quality when one feed is active)."""
+    with _jobs_lock:
+        active = sum(
+            1
+            for j in _jobs.values()
+            if j.get("is_live") and str(j.get("status") or "") in ("queued", "running")
+        )
+    # Single active panel: same headroom as uploaded-video analysis.
+    width = 1120 if active <= 1 else 1024
+    track_imgsz = 640 if active <= 1 else 640
+    ocr_interval = 1 if active <= 1 else 2
     opts = _coerce_opts(
-        conf=0.18,
+        conf=0.16,
         iou=0.55,
         stride=2,
-        width=960,
+        width=width,
         meter_per_pixel=0.05,
         max_speed=130.0,
         speed_smooth=0.4,
         fps=0.0,
-        ocr_interval=3,
-        min_ocr_conf=0.3,
-        track_imgsz=896,
+        ocr_interval=ocr_interval,
+        min_ocr_conf=0.22,
+        track_imgsz=track_imgsz,
         prefer_fast_encoder=False,
-        preview_jpeg_quality=72,
+        preview_jpeg_quality=74,
     )
+    opts["save_without_speed"] = True  # stationary driveway cars still register
     opts.update(overrides)
     return opts
 
@@ -279,6 +290,7 @@ def _auto_sync_to_cartrack(job_id: str, video_name: str, vehicles: list) -> int:
             vehicle = db.query(Vehicle).filter(Vehicle.plate_number == plate).first()
             te = v.get("t_enter_sec")
             ds = v.get("duration_sec")
+            pds = v.get("presence_duration_sec")
             row = ANPRDetection(
                 plate=plate,
                 speed_kmh=v.get("speed_kmh_avg") or v.get("speed_kmh_max") or v.get("speed_kmh_last"),
@@ -290,6 +302,7 @@ def _auto_sync_to_cartrack(job_id: str, video_name: str, vehicles: list) -> int:
                 t_enter_sec=float(te) if te is not None else None,
                 t_exit_sec=float(tx) if tx is not None else None,
                 duration_sec=float(ds) if ds is not None else None,
+                presence_duration_sec=float(pds) if pds is not None else None,
             )
             db.add(row)
             db.flush()
@@ -326,33 +339,51 @@ def _auto_sync_to_cartrack(job_id: str, video_name: str, vehicles: list) -> int:
     return saved
 
 
+def _refresh_live_presence(job_id: str, rows: list) -> None:
+    """Push live shop-presence seconds to open unsigned work orders."""
+    from ..services.camera_presence import refresh_live_presence_from_manifest
+
+    db = SessionLocal()
+    try:
+        refresh_live_presence_from_manifest(db, job_id=job_id, rows=rows)
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        _log.debug("live presence refresh job=%s: %s", job_id, exc)
+    finally:
+        db.close()
+
+
 def _collect_syncable_rows(rows: list, synced_keys: set[str]) -> list:
     """
-    Pick manifest rows to persist mid-session.
+    Pick exited manifest rows to persist mid-session.
 
-    A car is captured when its track cleanly exits OR when it has a confident,
-    plate-eligible read and has lingered long enough — the latter rescues cars
-    whose track fragments (BoT-SORT re-IDs) so they never emit a clean "exit",
-    which previously caused stable plates (e.g. fast-moving lane traffic) to be
-    detected on-screen yet never saved. Dedup is by normalized plate so the same
-    vehicle isn't re-synced every tick or across re-ID fragments.
+    Requires plate format eligible for CarTrack AND enough OCR evidence (votes +
+    dwell) so brief false positives on non-vehicle scenes are not synced.
+    Dedupes per (plate, track_id, exit time) so bay-return segments still sync.
     """
+    from ..utils.plates import aggregate_manifest_rows_by_plate, manifest_sync_quality_ok, sync_eligible_plate
+
+    jurisdiction = str(getattr(settings, "PLATE_JURISDICTION", "qa_uk") or "qa_uk")
     newly_done = []
-    for v in rows:
+    for v in aggregate_manifest_rows_by_plate(rows):
+        if str(v.get("status") or "").lower() != "exited":
+            continue
         plate = str(v.get("plate") or "").strip().upper()
         if not plate or plate in ("", "—", "…", "UNKNOWN"):
             continue
-        norm = "".join(ch for ch in plate if ch.isalnum())
-        if len(norm) < 3 or norm in synced_keys:
+        if not sync_eligible_plate(plate, jurisdiction=jurisdiction):
             continue
-        vst = str(v.get("status") or "").lower()
-        exited = vst in ("exited", "done", "exit")
-        dwell = float(v.get("duration_sec") or 0.0)
-        votes = int(v.get("ocr_vote_count") or 0)
-        confident_active = (not exited) and dwell >= 1.5 and votes >= 2
-        if exited or confident_active:
-            synced_keys.add(norm)
-            newly_done.append(v)
+        if not manifest_sync_quality_ok(v):
+            continue
+        norm = "".join(ch for ch in plate if ch.isalnum())
+        tid = v.get("track_id")
+        tx = v.get("t_exit_sec")
+        seg_key = f"{norm}:{tid}:{round(float(tx), 1) if tx is not None else 'open'}"
+        if len(norm) < 3 or seg_key in synced_keys:
+            continue
+        synced_keys.add(seg_key)
+        newly_done.append(v)
     return newly_done
 
 
@@ -385,7 +416,11 @@ def _validate_live_source(source: str) -> str:
                     "enter the camera IP from the DMSS app, then use source dahua-hero-a1."
                 ),
             )
-        return resolved
+        # Return the ALIAS, not the resolved URL: cloud HLS URLs carry an
+        # expirable session token, and a job that stores the resolved URL can
+        # never reconnect once that token dies. open_capture_for_live()
+        # re-resolves aliases on every (re)connect, fetching a fresh URL.
+        return raw
 
     s = normalize_live_source(source)
     if s.isdigit():
@@ -461,6 +496,7 @@ def _run_job(job_id: str, input_path: Path, output_path: Path, opts: dict) -> No
     progress_ticks = [0]
     last_manifest_persist = [0.0]
     last_live_sync = [0.0]
+    last_presence_refresh = [0.0]
     # Track keys already synced to CarTrack mid-analysis so we don't duplicate
     _synced_keys: set[str] = set()   # key = f"{track_id}:{plate}"
 
@@ -499,6 +535,10 @@ def _run_job(job_id: str, input_path: Path, output_path: Path, opts: dict) -> No
         if now - last_manifest_persist[0] >= 1.25:
             last_manifest_persist[0] = now
             _persist_job(job_id)
+
+        if now - last_presence_refresh[0] >= 1.0:
+            last_presence_refresh[0] = now
+            _refresh_live_presence(job_id, rows)
 
         # ── Live incremental sync: push any EXITED vehicle to CarTrack immediately ──
         # Rate-limit to at most once per 0.5 s to avoid hammering the DB
@@ -596,11 +636,13 @@ def _run_live_job(
         fps=opts["fps"],
         ocr_interval=opts["ocr_interval"],
         min_ocr_conf=opts["min_ocr_conf"],
+        save_without_speed=bool(opts.get("save_without_speed", True)),
     )
 
     progress_ticks = [0]
     last_manifest_persist = [0.0]
     last_live_sync = [0.0]
+    last_presence_refresh = [0.0]
     _synced_keys: set[str] = set()
     session_started = time.monotonic()
 
@@ -656,6 +698,10 @@ def _run_live_job(
         if now - last_manifest_persist[0] >= 1.25:
             last_manifest_persist[0] = now
             _persist_job(job_id)
+
+        if now - last_presence_refresh[0] >= 1.0:
+            last_presence_refresh[0] = now
+            _refresh_live_presence(job_id, rows)
 
         if now - last_live_sync[0] < 0.5:
             return
@@ -1233,17 +1279,43 @@ async def grid_slot_start(
     raw_source = (source or "").strip() or (dahua_default if slot == 0 else str(slot))
     src = _validate_live_source(raw_source)
     if is_dahua_alias(raw_source) or "/cam/realmonitor" in src.lower():
-        probe = probe_stream(src, timeout_sec=28.0)
-        if not probe.get("ok"):
+        from ..services.dahua_camera import resolve_dahua_source
+
+        do_always_probe = str(always_on).lower() in ("1", "true", "yes", "on")
+        probe_url = resolve_dahua_source(raw_source) if is_dahua_alias(raw_source) else src
+        if not probe_url and is_dahua_alias(raw_source):
             raise HTTPException(
                 status_code=400,
-                detail=probe.get("error")
-                or "Could not open Dahua RTSP. Confirm Same Wi-Fi (LAN) mode, IP from DMSS, and Test RTSP in Settings.",
+                detail=(
+                    "Dahua camera is not reachable yet. Open Settings → Dahua camera, "
+                    "start the cloud tunnel, or confirm the device is online in DMSS."
+                ),
             )
+        # 24/7 mode: tunnel/HLS URL resolved — let the live reconnect loop retry
+        # (P2P can be ready before the first frame; Easy4IP may be rate-limited).
+        if not (do_always_probe and probe_url and is_dahua_alias(raw_source)):
+            probe = probe_stream(probe_url or src, timeout_sec=28.0)
+            if not probe.get("ok"):
+                raise HTTPException(
+                    status_code=400,
+                    detail=probe.get("error")
+                    or "Could not open Dahua RTSP. Confirm Same Wi-Fi (LAN) mode, IP from DMSS, and Test RTSP in Settings.",
+                )
     label = f"Grid {slot + 1}: {_live_input_label(src)}"
     do_record = str(record).lower() in ("1", "true", "yes", "on")
     do_always = str(always_on).lower() in ("1", "true", "yes", "on")
     opts = _multi_cam_pipeline_opts()
+
+    # Cloud cameras: wake HD + mark viewer so ANPR is not stuck on the SD sub-stream.
+    if _is_dahua_live_source(src, raw_source):
+        try:
+            from ..services import stream_governor
+            from ..services.live_camera import normalize_live_source
+
+            gv_key = normalize_live_source(src)
+            stream_governor.boost_anpr_session(gv_key, allow_hd=True)
+        except Exception:
+            pass
 
     _prune_missing_usb_grid_slots(keep_slot=slot)
     _stop_live_for_source(src)

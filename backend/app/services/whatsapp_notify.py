@@ -51,6 +51,8 @@ def _runtime_enabled() -> bool:
 
 
 def is_configured() -> bool:
+    if bool(getattr(settings, "WHATSAPP_DRY_RUN", False)):
+        return True
     return bool(
         getattr(settings, "WHATSAPP_ENABLED", False)
         and str(getattr(settings, "WHATSAPP_ACCESS_TOKEN", "") or "").strip()
@@ -147,23 +149,202 @@ def _business_name() -> str:
         return "CarTrack Pro"
 
 
+def _fmt_duration_minutes(mins: float | int | None) -> str:
+    if mins is None or mins <= 0:
+        return "—"
+    m = int(round(float(mins)))
+    if m < 60:
+        return f"{m} min"
+    h, r = divmod(m, 60)
+    return f"{h}h {r}m" if r else f"{h}h"
+
+
 def _compose_completion_text(
-    *, customer_name: str, plate: str, visit_number: str, services: list[str], total: float | None
+    *,
+    customer_name: str,
+    plate: str,
+    visit_number: str,
+    services: list[str],
+    total: float | None,
+    duration_minutes: float | int | None = None,
+    entry_label: str = "",
+    exit_label: str = "",
+    bay: int | None = None,
+    payment_status: str = "",
+    service_lines: list[str] | None = None,
 ) -> str:
+    """Full work-order receipt suitable for WhatsApp (Markdown-style bold)."""
     shop = _business_name()
     lines = [
+        f"*{shop} — Work order complete*",
+        "",
         f"Hello {customer_name or 'valued customer'},",
         "",
-        f"Good news — the work on your vehicle *{plate}* is complete and it is ready for pickup.",
+        f"Your vehicle *{plate}* is ready for pickup.",
         "",
-        f"Work order: {visit_number}",
+        f"*Work order:* {visit_number}",
     ]
-    if services:
-        lines.append("Services: " + ", ".join(services[:6]))
-    if total:
-        lines.append(f"Total: QAR {total:,.0f}")
+    if bay:
+        lines.append(f"*Bay:* {bay}")
+    if entry_label:
+        lines.append(f"*Arrived:* {entry_label}")
+    if exit_label:
+        lines.append(f"*Completed:* {exit_label}")
+    if duration_minutes:
+        lines.append(f"*Time in shop:* {_fmt_duration_minutes(duration_minutes)}")
+    lines.append("")
+    if service_lines:
+        lines.append("*Services:*")
+        lines.extend(service_lines[:12])
+    elif services:
+        lines.append("*Services:* " + ", ".join(services[:8]))
+    lines.append("")
+    if total is not None:
+        lines.append(f"*Total:* QAR {total:,.0f}")
+    if payment_status:
+        lines.append(f"*Payment:* {payment_status.replace('_', ' ').title()}")
     lines += ["", f"Thank you for choosing {shop}!"]
     return "\n".join(lines)
+
+
+def _load_visit_for_notify(db, visit_id: int):
+    from sqlalchemy.orm import joinedload
+
+    from ..models.service import ServiceItem
+    from ..models.visit import Visit
+
+    return (
+        db.query(Visit)
+        .options(
+            joinedload(Visit.vehicle),
+            joinedload(Visit.service_items).joinedload(ServiceItem.service),
+            joinedload(Visit.service_items).joinedload(ServiceItem.assigned_staff),
+        )
+        .filter(Visit.id == visit_id)
+        .first()
+    )
+
+
+def _visit_whatsapp_payload(visit) -> tuple[str | None, str, dict[str, Any]]:
+    """Returns (phone, customer_name, kwargs for _compose_completion_text)."""
+    phone = visit.customer_phone or (visit.vehicle.owner_phone if visit.vehicle else None)
+    customer = visit.customer_name or (visit.vehicle.owner_name if visit.vehicle else "") or ""
+    plate = visit.vehicle.plate_number if visit.vehicle else "your vehicle"
+
+    service_names: list[str] = []
+    service_lines: list[str] = []
+    for si in visit.service_items or []:
+        name = si.service.name if si.service else "Service"
+        service_names.append(name)
+        price = si.price if si.price is not None else 0
+        dur = si.actual_duration_minutes
+        if dur is None and si.started_at and si.completed_at:
+            dur = max(1, int((si.completed_at - si.started_at).total_seconds() // 60))
+        line = f"• {name} — QAR {price:,.0f}"
+        if dur:
+            line += f" ({_fmt_duration_minutes(dur)})"
+        service_lines.append(line)
+
+    entry_label = ""
+    exit_label = ""
+    try:
+        from zoneinfo import ZoneInfo
+
+        tz = ZoneInfo(getattr(settings, "BUSINESS_TIMEZONE", "Asia/Qatar") or "Asia/Qatar")
+    except Exception:
+        tz = None
+
+    def _fmt_dt(dt) -> str:
+        if not dt:
+            return ""
+        try:
+            if tz:
+                local = dt.astimezone(tz) if dt.tzinfo else dt.replace(tzinfo=ZoneInfo("UTC")).astimezone(tz)
+                return local.strftime("%d %b %Y, %I:%M %p")
+        except Exception:
+            pass
+        return dt.strftime("%d %b %Y, %H:%M")
+
+    entry_label = _fmt_dt(visit.entry_time)
+    exit_label = _fmt_dt(visit.exit_time)
+
+    kwargs = {
+        "customer_name": customer,
+        "plate": plate,
+        "visit_number": visit.visit_number,
+        "services": service_names,
+        "total": visit.total_price,
+        "duration_minutes": visit.duration_minutes,
+        "entry_label": entry_label,
+        "exit_label": exit_label,
+        "bay": visit.assigned_bay,
+        "payment_status": str(visit.payment_status or "unpaid"),
+        "service_lines": service_lines,
+    }
+    return normalize_msisdn(phone), customer, kwargs
+
+
+def send_work_order_completion(visit_id: int, *, force: bool = False) -> dict[str, Any]:
+    """Send (or resend) the completion WhatsApp. Returns status dict for API responses."""
+    if not is_configured():
+        return {"ok": False, "error": "WhatsApp is not configured on the server (WHATSAPP_* env vars)"}
+    if not _runtime_enabled():
+        return {"ok": False, "error": "WhatsApp notifications are disabled in Settings"}
+
+    from datetime import UTC, datetime
+
+    from ..database import SessionLocal
+
+    db = SessionLocal()
+    try:
+        visit = _load_visit_for_notify(db, visit_id)
+        if visit is None:
+            return {"ok": False, "error": "Visit not found"}
+        if visit.status.value != "completed":
+            return {"ok": False, "error": "Work order must be completed before sending WhatsApp"}
+        if visit.whatsapp_notified_at is not None and not force:
+            return {"ok": False, "error": "WhatsApp already sent for this visit"}
+
+        phone, customer, text_kwargs = _visit_whatsapp_payload(visit)
+        if not phone:
+            return {"ok": False, "error": "No customer phone number on this work order"}
+
+        plate = text_kwargs["plate"]
+        template = str(getattr(settings, "WHATSAPP_TEMPLATE_NAME", "") or "").strip()
+        use_full_report = not template or bool(getattr(settings, "WHATSAPP_FULL_REPORT", True))
+        text = _compose_completion_text(**text_kwargs)
+
+        if bool(getattr(settings, "WHATSAPP_DRY_RUN", False)):
+            _log.info(
+                "WhatsApp DRY RUN for visit %s → %s\n%s",
+                visit.visit_number,
+                phone,
+                text,
+            )
+            print(f"\n--- WhatsApp DRY RUN -> +{phone} ---\n{text}\n---\n", flush=True)
+            visit.whatsapp_notified_at = datetime.now(UTC)
+            db.commit()
+            return {"ok": True, "dry_run": True, "phone": phone, "preview": text[:500]}
+
+        try:
+            if template and not use_full_report:
+                result = send_template(phone, template, [customer or "customer", plate])
+            else:
+                result = send_text(phone, text)
+        except RuntimeError as exc:
+            _log.warning("WhatsApp send failed for visit %s: %s", visit_id, exc)
+            return {"ok": False, "error": str(exc)}
+
+        visit.whatsapp_notified_at = datetime.now(UTC)
+        db.commit()
+        msg_id = ((result.get("messages") or [{}])[0]).get("id")
+        _log.info("WhatsApp completion sent for %s to %s (msg id %s)", visit.visit_number, phone, msg_id)
+        return {"ok": True, "message_id": msg_id, "phone": phone}
+    except Exception as exc:
+        _log.exception("WhatsApp send failed for visit %s", visit_id)
+        return {"ok": False, "error": str(exc)}
+    finally:
+        db.close()
 
 
 def notify_work_order_completed(visit_id: int) -> None:
@@ -174,54 +355,7 @@ def notify_work_order_completed(visit_id: int) -> None:
         return
 
     def _worker() -> None:
-        from datetime import UTC, datetime
-
-        from ..database import SessionLocal
-        from ..models.visit import Visit
-
-        db = SessionLocal()
-        try:
-            visit = db.query(Visit).filter(Visit.id == visit_id).first()
-            if visit is None or visit.whatsapp_notified_at is not None:
-                return
-            phone = visit.customer_phone or (visit.vehicle.owner_phone if visit.vehicle else None)
-            if not normalize_msisdn(phone):
-                _log.info("WhatsApp skip for visit %s: no customer phone", visit_id)
-                return
-            plate = visit.vehicle.plate_number if visit.vehicle else "your vehicle"
-            customer = visit.customer_name or (visit.vehicle.owner_name if visit.vehicle else "") or ""
-            services = [
-                si.service.name for si in (visit.service_items or [])
-                if si.service and si.service.name
-            ]
-            template = str(getattr(settings, "WHATSAPP_TEMPLATE_NAME", "") or "").strip()
-            try:
-                if template:
-                    result = send_template(phone, template, [customer or "customer", plate])
-                else:
-                    text = _compose_completion_text(
-                        customer_name=customer,
-                        plate=plate,
-                        visit_number=visit.visit_number,
-                        services=services,
-                        total=visit.total_price,
-                    )
-                    result = send_text(phone, text)
-            except RuntimeError as exc:
-                _log.warning("WhatsApp send failed for visit %s: %s", visit_id, exc)
-                return
-            visit.whatsapp_notified_at = datetime.now(UTC)
-            db.commit()
-            _log.info(
-                "WhatsApp completion sent for %s to %s (msg id %s)",
-                visit.visit_number,
-                normalize_msisdn(phone),
-                ((result.get("messages") or [{}])[0]).get("id"),
-            )
-        except Exception:
-            _log.exception("WhatsApp notify worker failed for visit %s", visit_id)
-        finally:
-            db.close()
+        send_work_order_completion(visit_id, force=False)
 
     threading.Thread(target=_worker, name=f"whatsapp-notify-{visit_id}", daemon=True).start()
 
@@ -233,5 +367,7 @@ def status_summary() -> dict[str, Any]:
         "enabled_env": bool(getattr(settings, "WHATSAPP_ENABLED", False)),
         "runtime_toggle": _runtime_enabled(),
         "uses_template": bool(str(getattr(settings, "WHATSAPP_TEMPLATE_NAME", "") or "").strip()),
+        "full_report": bool(getattr(settings, "WHATSAPP_FULL_REPORT", True)),
+        "dry_run": bool(getattr(settings, "WHATSAPP_DRY_RUN", False)),
         "default_country_code": str(getattr(settings, "WHATSAPP_DEFAULT_COUNTRY_CODE", "974")),
     }

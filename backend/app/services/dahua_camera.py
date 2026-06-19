@@ -18,6 +18,7 @@ import re
 import socket
 import subprocess
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
@@ -29,6 +30,10 @@ from ..config import settings
 from .camera_config import DEFAULT_DAHUA_HERO_A1, load_camera_config
 
 _log = logging.getLogger(__name__)
+
+# Easy4IP relay allows one RTSP client per tunnel — serialize opens.
+_RELAY_OPEN_LOCKS: dict[int, threading.RLock] = {}
+_RELAY_OPEN_LOCKS_GUARD = threading.Lock()
 
 HERO_A1_MODEL = "DH-H2A"
 SUPPORTED_HERO_MODELS = frozenset({"DH-H2A", "DH-H3A", "DH-H5A"})
@@ -47,7 +52,7 @@ HERO_A1_PROFILE: dict[str, Any] = {
     "name": "Dahua Hero A1 Indoor Pan/Tilt Wi-Fi Camera",
     "manufacturer": "Dahua",
     "connection_type": "wifi_rtsp",
-    "connection_modes": ["lan", "p2p", "auto", "cartrack_relay", "cloud_hls"],
+    "connection_modes": ["lan", "p2p", "auto", "cartrack_cloud", "cartrack_relay", "cloud_hls"],
     "usb_note": (
         "USB-C on this camera is for power only. Video uses Wi-Fi RTSP (LAN) or "
         "Dahua cloud P2P (like DMSS) when serial number is configured."
@@ -213,6 +218,24 @@ def normalize_dahua_username(username: str | None) -> str:
     return user
 
 
+def build_tunnel_rtsp_url(
+    *,
+    rtsp_port: int,
+    stream: str = "sub",
+    username: str = "admin",
+    password: str = "",
+) -> str:
+    """RTSP URL for a local Easy4IP P2P relay listener (127.0.0.1)."""
+    subtype = "0" if str(stream).lower() == "main" else "1"
+    port = int(rtsp_port)
+    path = f"/cam/realmonitor?channel=1&subtype={subtype}"
+    if password:
+        user = quote(normalize_dahua_username(username), safe="")
+        pwd = quote(password or "", safe="")
+        return f"rtsp://{user}:{pwd}@127.0.0.1:{port}{path}"
+    return f"rtsp://127.0.0.1:{port}{path}"
+
+
 def build_rtsp_url(
     *,
     host: str,
@@ -269,8 +292,10 @@ def _connection_mode(cfg: dict[str, Any]) -> str:
         return "p2p"
     if mode == "auto":
         return "auto"
-    if mode in ("cartrack", "cartrack_relay", "cartrack_cloud"):
+    if mode in ("cartrack", "cartrack_relay"):
         return "cartrack_relay"
+    if mode in ("cartrack_cloud", "cartrack_cloud_tunnel", "remote_cloud", "cartrack_remote"):
+        return "cartrack_cloud"
     return "lan"
 
 
@@ -281,6 +306,7 @@ def _try_cloud_tunnel_rtsp(
     password: str,
     stream: str,
     wait_sec: float = 45.0,
+    source_token: str | None = None,
 ) -> str | None:
     """Start cloud P2P if needed; return localhost RTSP URL when ready (non-blocking poll)."""
     from .dahua_p2p_tunnel import get_p2p_tunnel_manager
@@ -290,9 +316,21 @@ def _try_cloud_tunnel_rtsp(
         return None
     local_port = int(cfg.get("p2p_local_port") or 18554)
     mgr = get_p2p_tunnel_manager(serial, local_port=local_port)
+    st = mgr.status()
+    if st.get("running"):
+        url = build_tunnel_rtsp_url(
+            rtsp_port=int(st.get("local_port") or local_port),
+            stream=stream,
+            username=username,
+            password=password,
+        )
+        if source_token:
+            from . import stream_governor
+
+            stream_governor.register_relay_source(source_token)
+        return url
     lan_host = str(cfg.get("host") or "").strip()
     lan_fallback = f"{lan_host}:{int(cfg.get('rtsp_port') or 554)}" if lan_host else ""
-    st = mgr.status()
     if not st.get("running"):
         mgr.start_background(
             serial=serial,
@@ -306,13 +344,17 @@ def _try_cloud_tunnel_rtsp(
         st = mgr.status()
         if st.get("running"):
             port = int(st.get("local_port") or cfg.get("p2p_local_port") or 18554)
-            return build_rtsp_url(
-                host="127.0.0.1",
-                username=username,
-                password=password,
+            url = build_tunnel_rtsp_url(
                 rtsp_port=port,
                 stream=stream,
+                username=username,
+                password=password,
             )
+            if source_token:
+                from . import stream_governor
+
+                stream_governor.register_relay_source(source_token)
+            return url
         if st.get("phase") == "failed":
             break
         time.sleep(2.0)
@@ -332,7 +374,7 @@ def _dahua_is_configured(cfg: dict[str, Any]) -> bool:
         )
     if mode == "cartrack_relay":
         return bool(str(cfg.get("host") or "").strip())
-    if mode in ("p2p", "auto"):
+    if mode in ("p2p", "auto", "cartrack_cloud"):
         return bool(str(cfg.get("device_serial") or "").strip())
     return bool(str(cfg.get("host") or "").strip())
 
@@ -386,31 +428,79 @@ def resolve_dahua_source(source: str | None) -> str | None:
     stream = str(cfg.get("stream") or "sub")
 
     mode = _connection_mode(cfg)
-    if mode == "cloud_hls":
-        # Official Imou/Easy4IP Open Platform: cloud-served HLS (.m3u8). Pure
-        # cloud, CGNAT-proof, FFmpeg-native — replaces the fragile PTCP relay.
+    if mode in ("cloud_hls", "cartrack_cloud"):
         from . import stream_governor
-        from .easy4ip_openapi import resolve_easy4ip_hls
+        from .easy4ip_openapi import hls_backoff_remaining, resolve_easy4ip_hls
         from .live_camera import normalize_live_source
 
         gv_key = normalize_live_source(source)
         allow_hd = bool(cfg.get("openapi_prefer_hd", True))
-        stream_governor.register_cloud_source(gv_key, allow_hd=allow_hd)
+        hls_backoff = hls_backoff_remaining(cfg)
 
-        # Hybrid SD/HD: the governor picks the quota-friendly SD sub-stream by
-        # default and requests HD only while a plate is in frame.
-        prefer_hd_override: bool | None = None
-        if stream_governor.is_adaptive(gv_key) and bool(
-            getattr(settings, "STREAM_HYBRID_ENABLED", True)
-        ):
-            prefer_hd_override = stream_governor.preferred_tier(gv_key) == "hd" and allow_hd
+        def _resolve_hls() -> str | None:
+            prefer_hd_override: bool | None = None
+            if hls_backoff <= 0:
+                stream_governor.register_cloud_source(gv_key, allow_hd=allow_hd)
+                if stream_governor.is_adaptive(gv_key) and bool(
+                    getattr(settings, "STREAM_HYBRID_ENABLED", True)
+                ):
+                    prefer_hd_override = stream_governor.preferred_tier(gv_key) == "hd" and allow_hd
+                hls = resolve_easy4ip_hls(cfg, prefer_hd_override=prefer_hd_override)
+                if hls:
+                    if prefer_hd_override is not None:
+                        stream_governor.set_active_tier(gv_key, "hd" if prefer_hd_override else "sd")
+                    return hls
+            else:
+                stream_governor.register_relay_source(gv_key)
+            return None
 
-        hls = resolve_easy4ip_hls(cfg, prefer_hd_override=prefer_hd_override)
+        if mode == "cartrack_cloud":
+            from .cartrack_cloud_tunnel import resolve_cartrack_cloud_rtsp
+
+            stream_governor.register_relay_source(gv_key)
+            tunnel_url = resolve_cartrack_cloud_rtsp(cfg, source_token=gv_key, wait_sec=45.0)
+            if tunnel_url:
+                quick = probe_stream(
+                    tunnel_url,
+                    timeout_sec=10.0,
+                    username=username,
+                    password=password,
+                )
+                if quick.get("ok"):
+                    return tunnel_url
+                _log.warning(
+                    "CarTrack Cloud tunnel RTSP probe failed (%s) — trying Imou HLS fallback.",
+                    (quick.get("error") or "no frames")[:80],
+                )
+            else:
+                _log.warning("CarTrack Cloud tunnel unavailable — trying Imou HLS fallback.")
+            hls = _resolve_hls()
+            if hls:
+                return hls
+            if tunnel_url:
+                return tunnel_url
+            return None
+
+        # cloud_hls — official Imou/Easy4IP Open Platform HLS (.m3u8).
+        hls = _resolve_hls()
         if hls:
-            if prefer_hd_override is not None:
-                stream_governor.set_active_tier(gv_key, "hd" if prefer_hd_override else "sd")
             return hls
-        _log.warning("Easy4IP cloud HLS not available (check OpenAPI creds / device online).")
+
+        if hls_backoff <= 0:
+            _log.warning(
+                "Easy4IP cloud HLS not available (rate limit, offline, or creds) — "
+                "trying P2P cloud tunnel fallback."
+            )
+        tunnel_url = _try_cloud_tunnel_rtsp(
+            cfg,
+            username=username,
+            password=password,
+            stream=stream,
+            wait_sec=35.0,
+            source_token=gv_key,
+        )
+        if tunnel_url:
+            return tunnel_url
         return None
 
     if mode == "cartrack_relay":
@@ -445,6 +535,9 @@ def resolve_dahua_source(source: str | None) -> str | None:
         return lan_url
 
     if mode in ("p2p", "auto"):
+        from .live_camera import normalize_live_source
+
+        gv_key = normalize_live_source(source)
         lan_host = str(cfg.get("host") or "").strip()
         if lan_host:
             lan_url = build_rtsp_url(
@@ -468,6 +561,7 @@ def resolve_dahua_source(source: str | None) -> str | None:
             password=password,
             stream=stream,
             wait_sec=25.0 if mode == "p2p" else 15.0,
+            source_token=normalize_live_source(source),
         )
         if cloud_url:
             return cloud_url
@@ -503,6 +597,19 @@ def invalidate_dahua_cloud_cache(source: str | None) -> None:
     from .easy4ip_openapi import invalidate_hls_cache
 
     invalidate_hls_cache(cfg)
+
+
+def recreate_dahua_cloud_live(source: str | None) -> str | None:
+    """Destroy + re-create the cloud live session (heals 'errorcode segment'
+    playlists where the URL resolves but no media ever flows)."""
+    if not is_dahua_alias(source):
+        return None
+    cfg = _camera_cfg_for_id(dahua_id_from_source(source))
+    if not cfg or _connection_mode(cfg) != "cloud_hls":
+        return None
+    from .easy4ip_openapi import recreate_easy4ip_live
+
+    return recreate_easy4ip_live(cfg)
 
 
 def cloud_device_status_fast(serial: str, *, include_tunnel: bool = True) -> dict[str, Any]:
@@ -605,6 +712,7 @@ def public_dahua_config() -> dict[str, Any]:
     # Cloud summary is loaded separately via GET /cloud-status (never block settings page).
     cloud: dict[str, Any] = {}
     cartrack_relay = {}
+    cartrack_cloud: dict[str, Any] = {}
     if _connection_mode(cfg) == "cartrack_relay":
         from .cartrack_cloud_relay import get_cartrack_relay_manager, relay_urls_from_config
 
@@ -614,6 +722,10 @@ def public_dahua_config() -> dict[str, Any]:
             "view_url": view or None,
             "relay": get_cartrack_relay_manager().status(),
         }
+    if _connection_mode(cfg) == "cartrack_cloud":
+        from .cartrack_cloud_tunnel import tunnel_status
+
+        cartrack_cloud = tunnel_status(cfg)
     from .camera_config import dahua_env_active
 
     return {
@@ -624,6 +736,7 @@ def public_dahua_config() -> dict[str, Any]:
         "source_token": HERO_A1_PROFILE["default_source_token"],
         "cloud": cloud,
         "cartrack_relay": cartrack_relay,
+        "cartrack_cloud": cartrack_cloud,
         "connection_mode": _connection_mode(cfg),
         "env_configured": dahua_env_active(),
     }
@@ -652,13 +765,120 @@ def _ffmpeg_rtsp_options(use_tcp: bool, *, relay: bool = False) -> str:
 
 def _ffmpeg_hls_options() -> str:
     """FFmpeg options for cloud HLS (.m3u8 over http/https), e.g. Easy4IP Open
-    Platform. HLS first-frame is slow on a cold stream and the cloud edge can
-    briefly drop segments, so enable transparent reconnect and a generous read
-    timeout instead of the RTSP-oriented options."""
+    Platform. Do not use RTSP low-latency flags (nobuffer/low_delay) — they
+    prevent HLS segment reads on OpenCV's FFmpeg backend."""
     return (
         "reconnect;1|reconnect_streamed;1|reconnect_on_network_error;1"
         "|reconnect_delay_max;5|rw_timeout;30000000|timeout;30000000"
-        "|fflags;nobuffer|flags;low_delay"
+    )
+
+
+def hls_frame_is_quota_error(frame: Any) -> bool:
+    """True when Imou serves the static 'Insufficient flow resources' error frame."""
+    try:
+        import numpy as np
+
+        if frame is None or not hasattr(frame, "shape"):
+            return False
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if len(frame.shape) == 3 else frame
+        h, w = gray.shape[:2]
+        if h < 120 or w < 160:
+            return False
+        center = gray[h // 4 : 3 * h // 4, w // 4 : 3 * w // 4]
+        mean = float(np.mean(center))
+        std = float(np.std(center))
+        white_ratio = float(np.mean(center > 200))
+        # Dark background + bright centered error text (error code 11003 overlay).
+        return mean < 90 and std > 35 and white_ratio > 0.03
+    except Exception:
+        return False
+
+
+def switch_dahua_to_cloud_hls(source: str, *, prefer_sd: bool = True) -> bool:
+    """Persist Imou HLS mode when CarTrack Cloud tunnel is unavailable."""
+    if not is_dahua_alias(source):
+        return False
+    cid = dahua_id_from_source(source) or "hero-a1"
+    cfg = _camera_cfg_for_id(cid)
+    if not cfg or _connection_mode(cfg) == "cloud_hls":
+        return False
+    try:
+        from .camera_config import load_camera_config, save_camera_config
+
+        hero = load_camera_config().get("dahua_hero_a1") or {}
+        patch: dict[str, Any] = {**hero, "connection_mode": "cloud_hls", "enabled": True}
+        if prefer_sd:
+            patch["openapi_prefer_hd"] = False
+        save_camera_config({"dahua_hero_a1": patch})
+    except Exception:
+        return False
+    invalidate_dahua_cloud_cache(source)
+    _log.warning("Switched %s to Imou cloud HLS (CarTrack tunnel unavailable)", cid)
+    return True
+
+
+def switch_dahua_to_cartrack_cloud(source: str) -> bool:
+    """Persist CarTrack Cloud mode when Imou HLS media-flow quota is exhausted."""
+    if not is_dahua_alias(source):
+        return False
+    cid = dahua_id_from_source(source) or "hero-a1"
+    cfg = _camera_cfg_for_id(cid)
+    if not cfg or _connection_mode(cfg) == "cartrack_cloud":
+        return False
+    try:
+        from .camera_config import load_camera_config, save_camera_config
+
+        hero = load_camera_config().get("dahua_hero_a1") or {}
+        save_camera_config(
+            {"dahua_hero_a1": {**hero, "connection_mode": "cartrack_cloud", "enabled": True}}
+        )
+    except Exception:
+        return False
+    invalidate_dahua_cloud_cache(source)
+    try:
+        from .easy4ip_openapi import invalidate_hls_cache
+
+        invalidate_hls_cache(cfg)
+    except Exception:
+        pass
+    _log.warning(
+        "Switched %s to CarTrack Cloud tunnel (Imou HLS media-flow quota exhausted)",
+        cid,
+    )
+    return True
+
+
+def force_cloud_sd_for_source(source: str) -> None:
+    """Drop to SD sub-stream after Imou media-flow quota errors (error 11003)."""
+    from . import stream_governor
+    from .easy4ip_openapi import invalidate_hls_cache
+
+    cid = dahua_id_from_source(source) or "hero-a1"
+    cfg = _camera_cfg_for_id(cid)
+    if not cfg:
+        return
+    try:
+        from .camera_config import save_camera_config, update_camera
+
+        update_camera(cid, {"openapi_prefer_hd": False})
+        save_camera_config({"dahua_hero_a1": {"openapi_prefer_hd": False}})
+    except Exception:
+        pass
+    invalidate_dahua_cloud_cache(source)
+    if cfg:
+        invalidate_hls_cache(cfg)
+    gv_key = source
+    try:
+        from .live_camera import normalize_live_source
+
+        gv_key = normalize_live_source(source)
+    except Exception:
+        pass
+    stream_governor.register_cloud_source(gv_key, allow_hd=False)
+    stream_governor.set_active_tier(gv_key, "sd")
+    _log.warning(
+        "Imou media-flow quota hit for %s — switched to SD sub-stream (open.imoulife.com to recharge)",
+        cid,
     )
 
 
@@ -886,12 +1106,34 @@ def open_dahua_stream(
     """Open RTSP with FFmpeg backend and low-latency options (Windows-friendly)."""
     import os
 
+    relay = _is_relay_tunnel_url(rtsp_url)
+    if relay:
+        port = int(urlparse(rtsp_url).port or 18554)
+        with _RELAY_OPEN_LOCKS_GUARD:
+            lock = _RELAY_OPEN_LOCKS.setdefault(port, threading.RLock())
+        with lock:
+            return _open_dahua_stream_inner(
+                rtsp_url, use_tcp=use_tcp, buffer_size=buffer_size, relay=relay
+            )
+    return _open_dahua_stream_inner(
+        rtsp_url, use_tcp=use_tcp, buffer_size=buffer_size, relay=relay
+    )
+
+
+def _open_dahua_stream_inner(
+    rtsp_url: str,
+    *,
+    use_tcp: bool,
+    buffer_size: int,
+    relay: bool,
+) -> cv2.VideoCapture:
+    import os
+
     prev = os.environ.get("OPENCV_FFMPEG_CAPTURE_OPTIONS")
     scheme = (urlparse(rtsp_url).scheme or "").lower()
     if scheme in ("http", "https"):
         os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = _ffmpeg_hls_options()
     else:
-        relay = _is_relay_tunnel_url(rtsp_url)
         os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = _ffmpeg_rtsp_options(use_tcp, relay=relay)
     cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
     try:
@@ -966,6 +1208,70 @@ def probe_stream(
         if not auth_check.get("ok"):
             auth_check["elapsed_ms"] = int((time.monotonic() - started) * 1000)
             return auth_check
+
+    tunnel_port = int(parsed.port or 18554) if is_tunnel else 0
+    if is_tunnel:
+        with _RELAY_OPEN_LOCKS_GUARD:
+            tunnel_lock = _RELAY_OPEN_LOCKS.setdefault(tunnel_port, threading.RLock())
+    else:
+        tunnel_lock = None
+
+    def _probe_tunnel() -> dict[str, Any]:
+        ff_timeout = max(12.0, float(timeout_sec)) if is_tunnel else timeout_sec
+        ff = _probe_ffmpeg_frame(rtsp_url, use_tcp=use_tcp, timeout_sec=ff_timeout)
+        if ff.get("ok"):
+            ff["elapsed_ms"] = int((time.monotonic() - started) * 1000)
+            cap = open_dahua_stream(rtsp_url, use_tcp=use_tcp)
+            try:
+                if cap.isOpened():
+                    ret, _ = cap.read()
+                    if ret:
+                        ff["width"] = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+                        ff["height"] = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+                        ff["fps"] = round(float(cap.get(cv2.CAP_PROP_FPS) or 0.0), 2)
+            finally:
+                cap.release()
+            return ff
+
+        cap = open_dahua_stream(rtsp_url, use_tcp=use_tcp)
+        try:
+            if not cap.isOpened():
+                err = ff.get("error") or "Could not open RTSP stream (check IP, password, and Wi-Fi)."
+                return {
+                    "ok": False,
+                    "error": err,
+                    "elapsed_ms": int((time.monotonic() - started) * 1000),
+                }
+            deadline = started + max(2.0, float(timeout_sec))
+            frame_ok = False
+            while time.monotonic() < deadline:
+                ret, _ = cap.read()
+                if ret:
+                    frame_ok = True
+                    break
+                time.sleep(0.15)
+            if not frame_ok:
+                return {
+                    "ok": False,
+                    "error": "Stream opened but no video frame arrived (camera busy or wrong stream).",
+                    "elapsed_ms": int((time.monotonic() - started) * 1000),
+                }
+            w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+            h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+            fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+            return {
+                "ok": True,
+                "width": w,
+                "height": h,
+                "fps": round(fps, 2),
+                "elapsed_ms": int((time.monotonic() - started) * 1000),
+            }
+        finally:
+            cap.release()
+
+    if tunnel_lock is not None:
+        with tunnel_lock:
+            return _probe_tunnel()
 
     ff_timeout = max(12.0, float(timeout_sec)) if is_tunnel else timeout_sec
     ff = _probe_ffmpeg_frame(rtsp_url, use_tcp=use_tcp, timeout_sec=ff_timeout)
@@ -1097,8 +1403,18 @@ def diagnose_connectivity(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
         if ip.count(".") == 3 and not ip.startswith("127.")
     }
     cam_subnet = ".".join(lan_host.split(".")[:3]) if lan_host.count(".") == 3 else ""
+    remote_server = bool(
+        pc_ips
+        and all(
+            ip.startswith("172.") or ip.startswith("127.") or ip.startswith("10.0.0.")
+            for ip in pc_ips
+        )
+    )
     subnet_mismatch = bool(
-        cam_subnet and cam_subnet not in pc_subnets and not lan_host.startswith("127.")
+        not remote_server
+        and cam_subnet
+        and cam_subnet not in pc_subnets
+        and not lan_host.startswith("127.")
     )
 
     rtsp_reachable = False
@@ -1139,7 +1455,12 @@ def diagnose_connectivity(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
             "Cloud video tunnel did not finish (UDP/PTCP blocked on many home/office networks). "
             "LAN on the same Wi‑Fi is the most reliable fix; DMSS on your phone may still work."
         )
-    if not fixes:
+    if remote_server:
+        fixes = [
+            "CarTrack is running on a remote cloud server — live video uses the cloud tunnel, not LAN.",
+            "Click Bind camera to CarPro (once), then Connect & open live feed. Close Imou/DMSS on phones.",
+        ]
+    elif not fixes:
         fixes.append(
             "Re-enter the device password from DMSS (not your email login, not the QR security code)."
         )
@@ -1147,6 +1468,7 @@ def diagnose_connectivity(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
     return {
         "pc_ips": pc_ips,
         "camera_host": lan_host,
+        "remote_server": remote_server,
         "subnet_mismatch": subnet_mismatch,
         "lan_rtsp_reachable": rtsp_reachable,
         "lan_rtsp_error": rtsp_error,

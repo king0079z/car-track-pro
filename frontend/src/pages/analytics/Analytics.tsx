@@ -16,6 +16,7 @@ import {
   Legend, Line, ComposedChart,
 } from 'recharts';
 import { analyticsApi, anprApi } from '../../services/api';
+import { OpsQuickNav } from '../../components/ops/OpsQuickNav';
 import { fmtQatar, qatarYmd, qatarYearNow } from '../../lib/qatarTime';
 
 type AnalyticsTabId = 'overview' | 'services' | 'staff' | 'seasonal' | 'intelligence';
@@ -899,7 +900,7 @@ export const Analytics: React.FC = () => {
 
   const liveOps = [
     { label: 'Cars today', value: dashboard?.total_cars_today ?? '—', icon: Car, link: '/' },
-    { label: 'In shop now', value: dashboard?.cars_in_shop ?? '—', icon: Gauge, link: '/visits' },
+    { label: 'In shop now', value: dashboard?.cars_in_shop ?? '—', icon: Gauge, link: '/visits?view=floor' },
     { label: 'Revenue today', value: dashboard != null ? `QAR ${Number(dashboard.total_revenue_today || 0).toLocaleString()}` : '—', icon: DollarSign, link: '/visits' },
     { label: 'ANPR reads today', value: dashboard?.anpr_detected_today ?? anprSnap?.today_detections ?? '—', icon: ScanLine, link: '/visionflow' },
   ];
@@ -924,6 +925,7 @@ export const Analytics: React.FC = () => {
         }
       `}</style>
       <div className="analytics-screen-ui">
+      <OpsQuickNav primaryAction={{ to: '/visits/new', label: 'Work order' }} />
       {/* Hero */}
       <div style={{
         position: 'relative',
@@ -1013,33 +1015,6 @@ export const Analytics: React.FC = () => {
                 ))}
               </div>
             </div>
-          </div>
-
-          {/* Quick navigation — app-wide */}
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 22 }}>
-            {[
-              { to: '/', label: 'Dashboard', icon: LayoutDashboard },
-              { to: '/visits', label: 'Visits', icon: Car },
-              { to: '/vehicles', label: 'Vehicles', icon: Zap },
-              { to: '/services', label: 'Services', icon: Wrench },
-              { to: '/visionflow', label: 'ANPR & speed', icon: Gauge },
-              { to: '/visionflow/history', label: 'Analysis history', icon: ScanLine },
-            ].map(({ to, label, icon: Icon }) => (
-              <Link
-                key={to}
-                to={to}
-                style={{
-                  display: 'inline-flex', alignItems: 'center', gap: 8,
-                  padding: '8px 14px', borderRadius: 10,
-                  background: 'var(--bg-surface)', border: '1px solid var(--border-light)',
-                  color: 'var(--text-secondary)', fontSize: 12.5, fontWeight: 600,
-                  textDecoration: 'none', transition: 'border-color 0.15s, color 0.15s',
-                }}
-              >
-                <Icon size={14} color="var(--text-accent)" /> {label}
-                <ChevronRight size={14} color="var(--text-muted)" />
-              </Link>
-            ))}
           </div>
         </div>
       </div>

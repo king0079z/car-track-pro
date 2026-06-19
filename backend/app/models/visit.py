@@ -68,6 +68,8 @@ class Visit(Base):
     payment_method = Column(String(30))
 
     notes = Column(Text)
+    # Set once the WhatsApp "vehicle ready" message was delivered (idempotency).
+    whatsapp_notified_at = Column(DateTime(timezone=True))
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 

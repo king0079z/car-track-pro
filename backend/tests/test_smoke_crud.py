@@ -99,6 +99,56 @@ def test_update_service_item_duration_mixed_tz(client, admin_token):
     assert item["actual_duration_minutes"] == 90.0
 
 
+def test_checkout_marks_payment_paid(client, admin_token):
+    headers = {"Authorization": f"Bearer {admin_token}"}
+    v = client.post(
+        "/api/vehicles",
+        json={"plate_number": "QA-PAY-01", "plate_country": "QA"},
+        headers=headers,
+    )
+    assert v.status_code == 201
+    visit = client.post(
+        "/api/visits",
+        json={"vehicle_id": v.json()["id"], "customer_name": "Pay test"},
+        headers=headers,
+    )
+    assert visit.status_code == 201
+    visit_id = visit.json()["id"]
+    assert visit.json()["payment_status"] == "unpaid"
+
+    checkout = client.post(f"/api/visits/{visit_id}/checkout", headers=headers)
+    assert checkout.status_code == 200
+    body = checkout.json()
+    assert body["status"] == "completed"
+    assert body["payment_status"] == "paid"
+
+
+def test_complete_visit_via_patch_marks_payment_paid(client, admin_token):
+    headers = {"Authorization": f"Bearer {admin_token}"}
+    v = client.post(
+        "/api/vehicles",
+        json={"plate_number": "QA-PAY-02", "plate_country": "QA"},
+        headers=headers,
+   )
+    assert v.status_code == 201
+    visit = client.post(
+        "/api/visits",
+        json={"vehicle_id": v.json()["id"]},
+        headers=headers,
+    )
+    assert visit.status_code == 201
+    visit_id = visit.json()["id"]
+
+    updated = client.patch(
+        f"/api/visits/{visit_id}",
+        json={"status": "completed", "exit_time": "2026-06-10T12:00:00Z"},
+        headers=headers,
+    )
+    assert updated.status_code == 200
+    assert updated.json()["status"] == "completed"
+    assert updated.json()["payment_status"] == "paid"
+
+
 def test_analytics_service_endpoints(client, admin_token):
     headers = {"Authorization": f"Bearer {admin_token}"}
     for path in (

@@ -717,7 +717,7 @@ def prewarm_cloud_tunnel_async() -> None:
     from .dahua_camera import _connection_mode, dahua_hero_a1_config
 
     cfg = dahua_hero_a1_config()
-    if not cfg.get("enabled") or _connection_mode(cfg) not in ("p2p", "auto"):
+    if not cfg.get("enabled") or _connection_mode(cfg) not in ("p2p", "auto", "cartrack_cloud"):
         return
     serial = str(cfg.get("device_serial") or "").strip()
     password = str(cfg.get("password") or "")

@@ -185,6 +185,71 @@ def test_consolidate_does_not_resume_after_gap_expired():
     assert len(out) == 2
 
 
+def test_presence_duration_live_paused_done():
+    """Shop presence counts while Live, freezes when Paused, locks on Done."""
+    rows = [
+        {
+            "track_id": 1,
+            "plate": "8174 HGL",
+            "t_enter_sec": 100.0,
+            "t_exit_sec": 130.0,
+            "duration_sec": 30.0,
+            "status": "exited",
+        },
+    ]
+    paused = consolidate_vehicle_rows(rows, resume_gap_sec=1800.0, now_sec=200.0)
+    assert paused[0]["resume_eligible"] is True
+    assert paused[0]["presence_duration_sec"] == pytest.approx(30.0)
+
+    live = [
+        {
+            "track_id": 2,
+            "plate": "8174 HGL",
+            "t_enter_sec": 100.0,
+            "t_exit_sec": 140.0,
+            "duration_sec": 40.0,
+            "status": "active",
+        },
+    ]
+    active = consolidate_vehicle_rows(live, now_sec=150.0)
+    assert active[0]["presence_duration_sec"] == pytest.approx(50.0)
+
+    done = consolidate_vehicle_rows(rows, resume_gap_sec=1800.0, now_sec=4000.0)
+    assert "resume_eligible" not in done[0]
+    assert done[0]["presence_duration_sec"] == pytest.approx(30.0)
+
+
+def test_consolidate_keeps_two_distinct_cars():
+    """Two different plates at once — both stay in the registry manifest."""
+    rows = [
+        {
+            "track_id": 1,
+            "plate": "8174 HGL",
+            "t_enter_sec": 10.0,
+            "t_exit_sec": 40.0,
+            "duration_sec": 30.0,
+            "status": "exited",
+            "ocr_vote_count": 3,
+            "ocr_confidence": 0.92,
+        },
+        {
+            "track_id": 2,
+            "plate": "652190",
+            "t_enter_sec": 50.0,
+            "t_exit_sec": 80.0,
+            "duration_sec": 30.0,
+            "status": "active",
+            "ocr_vote_count": 2,
+            "ocr_confidence": 0.9,
+        },
+    ]
+    out = consolidate_vehicle_rows(rows, now_sec=100.0)
+    plates = {r["plate"] for r in out}
+    assert "8174 HGL" in plates
+    assert "652190" in plates
+    assert len(out) == 2
+
+
 @pytest.mark.parametrize(
     "text,jurisdiction,expected",
     [
@@ -233,3 +298,14 @@ def test_accept_commercial_plate_rejects_screen_noise():
 def test_accept_plate_read_non_strict():
     assert accept_plate_read("3574 BNW", jurisdiction="qa", strict=False) is True
     assert accept_plate_read("259559", jurisdiction="qa_uk", strict=False) is True
+    assert accept_plate_read("DHH34", jurisdiction="qa_uk", strict=False) is False
+    assert accept_plate_read("1334", jurisdiction="qa_uk", strict=False) is True
+
+
+def test_sync_eligible_rejects_ocr_noise():
+    from app.utils.plates import sync_eligible_plate
+
+    assert sync_eligible_plate("3574 BNW", jurisdiction="qa_uk") is True
+    assert sync_eligible_plate("259559", jurisdiction="qa_uk") is True
+    assert sync_eligible_plate("DHH34", jurisdiction="qa_uk") is False
+    assert sync_eligible_plate("DHH33", jurisdiction="qa_uk") is False

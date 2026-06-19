@@ -144,6 +144,43 @@ async def lifespan(app: FastAPI):
         "Operational audit scheduler started "
         f"(first snapshot ~{settings.AUDIT_STARTUP_DELAY_SECONDS}s, then every {settings.AUDIT_PERIODIC_INTERVAL_SECONDS}s) ✓"
     )
+
+    from .services.auto_checkout import periodic_auto_checkout_loop
+    from .services.backup_service import periodic_backup_loop
+
+    backup_task = asyncio.create_task(periodic_backup_loop())
+    if settings.BACKUP_ENABLED:
+        logger.info(
+            f"Automatic backups enabled (every {settings.BACKUP_INTERVAL_HOURS}h, "
+            f"keep {settings.BACKUP_RETENTION_DAYS} days) ✓"
+        )
+    auto_checkout_task = asyncio.create_task(periodic_auto_checkout_loop())
+    logger.info("ANPR auto-checkout scheduler started (active when enabled in Settings) ✓")
+
+    try:
+        from .database import SessionLocal
+        from .routers.visits import backfill_completed_payment_status
+        from .services.service_duration import backfill_completed_visit_durations
+
+        db = SessionLocal()
+        try:
+            n = backfill_completed_payment_status(db)
+            if n:
+                logger.info("Backfilled payment_status=paid on %d completed visit(s) ✓", n)
+            d = backfill_completed_visit_durations(db)
+            if d:
+                logger.info("Recalculated shop duration on %d completed visit(s) ✓", d)
+        finally:
+            db.close()
+    except Exception:
+        logger.exception("Completed-visit startup backfill failed")
+
+    from .services.whatsapp_notify import is_configured as _wa_configured
+    logger.info(
+        "WhatsApp completion notifications configured ✓"
+        if _wa_configured()
+        else "WhatsApp notifications not configured (set WHATSAPP_* env to enable)"
+    )
     try:
         from .services.dahua_p2p_tunnel import check_p2p_dependencies, prewarm_cloud_tunnel_async
         from .services.camera_config import dahua_env_active, dahua_prewarm_on_startup
@@ -158,6 +195,11 @@ async def lifespan(app: FastAPI):
         if not dep_err and (dahua_prewarm_on_startup() or not dahua_env_active()):
             prewarm_cloud_tunnel_async()
             logger.info("Dahua cloud P2P prewarm started (if camera enabled in cloud mode) ✓")
+        if not dep_err:
+            from .services.cartrack_cloud_tunnel import start_cloud_tunnel_keeper_async
+
+            start_cloud_tunnel_keeper_async()
+            logger.info("CarTrack Cloud tunnel keeper started ✓")
     except Exception:
         logger.exception("Dahua cloud P2P startup hook failed")
 
@@ -176,11 +218,12 @@ async def lifespan(app: FastAPI):
 
     from .services.live_supervisor import get_live_supervisor
     get_live_supervisor().stop()
-    audit_task.cancel()
-    try:
-        await audit_task
-    except asyncio.CancelledError:
-        pass
+    for task in (audit_task, backup_task, auto_checkout_task):
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
     try:
         from .database import checkpoint_wal
 

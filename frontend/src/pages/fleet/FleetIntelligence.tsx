@@ -11,6 +11,7 @@ import {
   CartesianGrid,
 } from 'recharts';
 import { analyticsApi } from '../../services/api';
+import { OpsQuickNav } from '../../components/ops/OpsQuickNav';
 import { qatarYmd, fmtQatar } from '../../lib/qatarTime';
 import toast from 'react-hot-toast';
 
@@ -991,6 +992,7 @@ export const FleetIntelligence: React.FC = () => {
 
   return (
     <div className="animate-fade-in">
+      <OpsQuickNav primaryAction={{ to: '/visits/new', label: 'Work order' }} />
       <div style={{
         borderRadius: 20, overflow: 'hidden', marginBottom: 22,
         border: '1px solid var(--border-light)',
@@ -1033,6 +1035,9 @@ export const FleetIntelligence: React.FC = () => {
               <button type="button" className="btn btn-secondary" onClick={exportCsv} disabled={!svcByType.length} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                 <Download size={14} /> Export
               </button>
+              <Link to="/services" className="btn btn-ghost" style={{ display: 'flex', alignItems: 'center', gap: 6, textDecoration: 'none' }}>
+                <Wrench size={14} /> Service catalogue <ArrowRight size={14} />
+              </Link>
               <Link to="/vehicles" className="btn btn-ghost" style={{ display: 'flex', alignItems: 'center', gap: 6, textDecoration: 'none' }}>
                 <Car size={14} /> Fleet registry <ArrowRight size={14} />
               </Link>

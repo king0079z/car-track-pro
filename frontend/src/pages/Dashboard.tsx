@@ -1,15 +1,20 @@
-import React, { useState, useEffect } from 'react';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import React, { useState, useEffect, useMemo } from 'react';
+import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
+import toast from 'react-hot-toast';
 import {
   Car, CheckCircle, DollarSign, Activity,
   ArrowRight, RefreshCw,
   AlertTriangle, Target, Timer,
-  ScanLine, Link2, Plus, ClipboardList,
-  ExternalLink,
+  ClipboardList,
+  ExternalLink, LogOut, PlayCircle,
 } from 'lucide-react';
-import { analyticsApi, visitsApi, anprApi } from '../services/api';
+import { analyticsApi, visitsApi } from '../services/api';
 import { useWebSocket } from '../hooks/useWebSocket';
+import { OpsQuickNav } from '../components/ops/OpsQuickNav';
+import { AnprDashboardWidget } from '../components/anpr/AnprDashboardWidget';
+import { DashboardTodayOps } from '../components/dashboard/DashboardTodayOps';
+import { LiveCameraEmbedPanel } from './visionflow/VisionFlowMultiCam';
 import {
   AreaChart, Area, XAxis, YAxis, Tooltip,
   ResponsiveContainer, CartesianGrid,
@@ -66,7 +71,7 @@ const tdStyle: React.CSSProperties = {
   verticalAlign: 'middle',
 };
 
-/* ── Enhanced Bay Map ─────────────────────────── */
+/* ── Enhanced Bay Map (legacy grid — use BayBoard in main layout) ── */
 const BayMap: React.FC<{ activeBays: number[]; total: number }> = ({ activeBays, total }) => (
   <div style={{ display: 'grid', gridTemplateColumns: `repeat(${Math.min(total, 5)}, 1fr)`, gap: 6 }}>
     {Array.from({ length: total }, (_, i) => i + 1).map(bay => {
@@ -98,7 +103,13 @@ const BayMap: React.FC<{ activeBays: number[]; total: number }> = ({ activeBays,
 );
 
 /* ── Live Visit Row ─────────────────────────── */
-const LiveRow: React.FC<{ visit: Visit; rank: number }> = ({ visit, rank }) => {
+const LiveRow: React.FC<{
+  visit: Visit;
+  rank: number;
+  onStart?: (id: number) => void;
+  onCheckout?: (id: number) => void;
+  busy?: boolean;
+}> = ({ visit, rank, onStart, onCheckout, busy }) => {
   const mins = useLiveMinutes(visit.entry_time);
   const cfg = STATUS_CONFIG[visit.status] || STATUS_CONFIG.waiting;
   const isLate = mins > 120;
@@ -196,121 +207,32 @@ const LiveRow: React.FC<{ visit: Visit; rank: number }> = ({ visit, rank }) => {
             </span>
           : <span style={{ color: 'var(--text-muted)' }}>—</span>}
       </td>
-      <td style={{ ...tdStyle, textAlign: 'right', paddingRight: 18 }}>
-        <Link
-          to={`/visits/${visit.id}`}
-          className="btn btn-ghost btn-sm"
-          style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11, padding: '4px 10px', textDecoration: 'none' }}
-        >
-          Open <ExternalLink size={11} />
-        </Link>
+      <td style={{ ...tdStyle, textAlign: 'right', paddingRight: 12 }}>
+        <div style={{ display: 'inline-flex', gap: 4, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+          {visit.status === 'waiting' && onStart && (
+            <button type="button" className="btn btn-secondary btn-sm" disabled={busy}
+              style={{ fontSize: 10, padding: '3px 8px' }}
+              onClick={() => onStart(visit.id)}>
+              <PlayCircle size={11} /> Start
+            </button>
+          )}
+          {['waiting', 'in_service', 'on_hold'].includes(visit.status) && onCheckout && (
+            <button type="button" className="btn btn-success btn-sm" disabled={busy}
+              style={{ fontSize: 10, padding: '3px 8px' }}
+              onClick={() => onCheckout(visit.id)}>
+              <LogOut size={11} /> Out
+            </button>
+          )}
+          <Link
+            to={`/visits/${visit.id}`}
+            className="btn btn-ghost btn-sm"
+            style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11, padding: '4px 8px', textDecoration: 'none' }}
+          >
+            Open
+          </Link>
+        </div>
       </td>
     </tr>
-  );
-};
-
-/* ── ANPR live widget ───────────────────────── */
-const AnprWidget: React.FC = () => {
-  const { data: statsRes } = useQuery({ queryKey: ['anpr-stats'], queryFn: () => anprApi.stats(), refetchInterval: 30000 });
-  const { data: recentRes } = useQuery({ queryKey: ['anpr-recent'], queryFn: () => anprApi.recent(8), refetchInterval: 20000 });
-  const stats = statsRes?.data;
-  const recent: any[] = recentRes?.data ?? [];
-
-  if (!stats && !recent.length) return null;
-
-  return (
-    <div className="card" style={{ overflow: 'hidden', marginBottom: 14, border: '1px solid var(--border-light)', padding: 0 }}>
-      <div style={{
-        padding: '10px 14px', borderBottom: '1px solid var(--border-light)',
-        display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8,
-        background: 'var(--bg-elevated)',
-      }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <ScanLine size={14} color="#06b6d4" />
-          <div>
-            <div style={{ fontSize: 13, fontWeight: 800, color: 'var(--text-primary)' }}>ANPR detections</div>
-            <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>Recent plate reads</div>
-          </div>
-        </div>
-        <Link to="/visionflow" className="btn btn-ghost btn-sm" style={{ textDecoration: 'none', fontSize: 11, padding: '4px 10px' }}>
-          Analyzer <ArrowRight size={11} />
-        </Link>
-      </div>
-
-      {/* Stats strip */}
-      {stats && (
-        <div className="anpr-stats-row" style={{ borderBottom: '1px solid var(--border-light)' }}>
-          {[
-            { label: 'Today', value: stats.today_detections ?? 0, color: '#06b6d4' },
-            { label: 'Plates', value: stats.today_unique_plates ?? 0, color: '#3b82f6' },
-            { label: 'Week', value: stats.week_detections ?? 0, color: '#8b5cf6' },
-            { label: 'Speed', value: stats.avg_speed_kmh ? `${stats.avg_speed_kmh}` : '—', color: '#d97706' },
-            { label: 'Linked', value: stats.linked_to_vehicle ?? 0, color: '#059669' },
-          ].map(s => (
-            <div key={s.label} style={{ padding: '8px 0', textAlign: 'center', borderRight: '1px solid var(--border-light)' }}>
-              <div style={{ fontSize: 15, fontWeight: 800, color: s.color, fontVariantNumeric: 'tabular-nums' }}>{s.value}</div>
-              <div style={{ fontSize: 9, color: 'var(--text-muted)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em', marginTop: 1 }}>{s.label}</div>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* Recent rows */}
-      {recent.length > 0 && (
-        <div className="table-scroll">
-          <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 720 }}>
-            <thead>
-              <tr>
-                {['Plate', 'Speed', 'Vehicle', 'Owner', 'Visits', 'Detected', ''].map(h => (
-                  <th key={h || 'act'} style={{ ...thStyle, textAlign: h === '' ? 'right' : 'left', paddingRight: h === '' ? 18 : undefined }}>{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {recent.slice(0, 5).map((d: any, idx: number) => (
-                <tr key={d.id} style={{ background: idx % 2 === 1 ? 'rgba(6,182,212,0.02)' : 'transparent' }}>
-                  <td style={{ ...tdStyle, fontFamily: 'ui-monospace, monospace', fontWeight: 800, fontSize: 13, color: 'var(--text-primary)', letterSpacing: '0.06em' }}>{d.plate}</td>
-                  <td style={{ ...tdStyle, fontVariantNumeric: 'tabular-nums' }}>
-                    {d.speed_kmh != null ? <span style={{ color: '#d97706', fontWeight: 700 }}>{d.speed_kmh} km/h</span> : '—'}
-                  </td>
-                  <td style={tdStyle}>
-                    {d.vehicle ? (
-                      <span style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 12, color: '#059669', fontWeight: 600 }}>
-                        <Link2 size={12} /> {[d.vehicle.make, d.vehicle.model].filter(Boolean).join(' ') || d.vehicle.plate_number}
-                      </span>
-                    ) : <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>Not registered</span>}
-                  </td>
-                  <td style={{ ...tdStyle, color: 'var(--text-secondary)' }}>{d.vehicle?.owner_name || '—'}</td>
-                  <td style={{ ...tdStyle, fontVariantNumeric: 'tabular-nums', fontWeight: 700 }}>{d.vehicle?.total_visits ?? '—'}</td>
-                  <td style={{ ...tdStyle, color: 'var(--text-muted)', fontSize: 12, whiteSpace: 'nowrap' }}>{d.detected_at ? fmtQatarEntryHm(d.detected_at) : '—'}</td>
-                  <td style={{ ...tdStyle, textAlign: 'right', paddingRight: 18 }}>
-                    <div style={{ display: 'flex', gap: 4, justifyContent: 'flex-end' }}>
-                      {d.vehicle && (
-                        <Link to={`/vehicles/${d.vehicle.id}`} className="btn btn-ghost btn-sm" style={{ fontSize: 11, padding: '4px 8px', textDecoration: 'none' }}>
-                          <Car size={11} /> Profile
-                        </Link>
-                      )}
-                      <Link to={`/visits/new?plate=${encodeURIComponent(d.plate)}`} className="btn btn-secondary btn-sm" style={{ fontSize: 11, padding: '4px 8px', textDecoration: 'none' }}>
-                        <Plus size={11} /> Visit
-                      </Link>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-
-      {recent.length === 0 && (
-        <div style={{ padding: '24px', textAlign: 'center', color: 'var(--text-muted)', fontSize: 13 }}>
-          No ANPR detections yet — start live analysis on{' '}
-          <Link to="/visionflow" style={{ color: 'var(--blue)', textDecoration: 'none' }}>ANPR &amp; Speed</Link>
-          {' '}or the{' '}
-          <Link to="/visionflow/multicam" style={{ color: 'var(--blue)', textDecoration: 'none' }}>Camera wall</Link>.
-        </div>
-      )}
-    </div>
   );
 };
 
@@ -359,6 +281,32 @@ export const Dashboard: React.FC = () => {
   const qc = useQueryClient();
   const { user } = useAuth();
   const [lastRefresh, setLastRefresh] = useState(new Date());
+  const [queueTab, setQueueTab] = useState<'all' | 'waiting' | 'in_service' | 'on_hold'>('all');
+
+  const startMutation = useMutation({
+    mutationFn: (id: number) => visitsApi.update(id, { status: 'in_service' }),
+    onSuccess: () => {
+      toast.success('Marked in service');
+      qc.invalidateQueries({ queryKey: ['active-visits'] });
+      qc.invalidateQueries({ queryKey: ['dashboard-stats'] });
+      qc.invalidateQueries({ queryKey: ['analytics-today-ops'] });
+    },
+    onError: () => toast.error('Could not update status'),
+  });
+
+  const checkoutMutation = useMutation({
+    mutationFn: (id: number) => visitsApi.checkout(id),
+    onSuccess: () => {
+      toast.success('Checked out');
+      qc.invalidateQueries({ queryKey: ['active-visits'] });
+      qc.invalidateQueries({ queryKey: ['dashboard-stats'] });
+      qc.invalidateQueries({ queryKey: ['analytics-today-ops'] });
+      qc.invalidateQueries({ queryKey: ['visits'] });
+    },
+    onError: () => toast.error('Checkout failed'),
+  });
+
+  const opsBusy = startMutation.isPending || checkoutMutation.isPending;
 
   const { data: stats } = useQuery({
     queryKey: ['dashboard-stats'],
@@ -382,6 +330,7 @@ export const Dashboard: React.FC = () => {
     if (['visit_update', 'new_entry'].includes(msg.type)) {
       qc.invalidateQueries({ queryKey: ['dashboard-stats'] });
       qc.invalidateQueries({ queryKey: ['active-visits'] });
+      qc.invalidateQueries({ queryKey: ['analytics-today-ops'] });
       setLastRefresh(new Date());
     }
   });
@@ -389,6 +338,7 @@ export const Dashboard: React.FC = () => {
   const handleRefresh = () => {
     qc.invalidateQueries({ queryKey: ['dashboard-stats'] });
     qc.invalidateQueries({ queryKey: ['active-visits'] });
+    qc.invalidateQueries({ queryKey: ['analytics-today-ops'] });
     setLastRefresh(new Date());
   };
 
@@ -462,6 +412,26 @@ export const Dashboard: React.FC = () => {
     return mins > 90 && ['waiting', 'in_service', 'on_hold'].includes(v.status);
   });
 
+  const queueVisits = useMemo(() => {
+    let list = [...((activeVisits as Visit[]) || [])];
+    if (queueTab !== 'all') list = list.filter(v => v.status === queueTab);
+    return list.sort((a, b) => {
+      const da = Date.now() - new Date(a.entry_time).getTime();
+      const db = Date.now() - new Date(b.entry_time).getTime();
+      return db - da;
+    });
+  }, [activeVisits, queueTab]);
+
+  const queueCounts = useMemo(() => {
+    const list = (activeVisits as Visit[]) || [];
+    return {
+      all: list.length,
+      waiting: list.filter(v => v.status === 'waiting').length,
+      in_service: list.filter(v => v.status === 'in_service').length,
+      on_hold: list.filter(v => v.status === 'on_hold').length,
+    };
+  }, [activeVisits]);
+
   return (
     <div className="animate-fade-in">
       <style>{`
@@ -497,6 +467,8 @@ export const Dashboard: React.FC = () => {
           </Link>
         </div>
       )}
+
+      <OpsQuickNav primaryAction={{ to: '/visits/new', label: 'Work order' }} />
 
       {/* Compact header */}
       <div style={{
@@ -601,21 +573,30 @@ export const Dashboard: React.FC = () => {
           display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8,
           background: 'var(--bg-elevated)',
         }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span style={{ fontSize: 13, fontWeight: 800, color: 'var(--text-primary)' }}>Active visits</span>
-            {(activeVisits?.length ?? 0) > 0 && (
-              <span style={{
-                background: 'rgba(59,130,246,0.1)', color: 'var(--text-accent)',
-                borderRadius: 99, padding: '1px 8px', fontSize: 10, fontWeight: 800,
-              }}>{activeVisits?.length}</span>
-            )}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            <span style={{ fontSize: 13, fontWeight: 800, color: 'var(--text-primary)' }}>Shop floor queue</span>
+            {([
+              ['all', 'All', queueCounts.all],
+              ['waiting', 'Waiting', queueCounts.waiting],
+              ['in_service', 'In service', queueCounts.in_service],
+              ['on_hold', 'On hold', queueCounts.on_hold],
+            ] as const).map(([key, label, n]) => (
+              <button
+                key={key}
+                type="button"
+                className={`ops-queue-tab${queueTab === key ? ' active' : ''}`}
+                onClick={() => setQueueTab(key)}
+              >
+                {label}{n > 0 ? ` (${n})` : ''}
+              </button>
+            ))}
           </div>
-          <Link to="/visits" className="btn btn-ghost btn-sm" style={{ textDecoration: 'none', fontSize: 11, padding: '3px 8px' }}>
-            All visits <ArrowRight size={11} />
+          <Link to="/visits?view=floor" className="btn btn-ghost btn-sm" style={{ textDecoration: 'none', fontSize: 11, padding: '3px 8px' }}>
+            Full floor view <ArrowRight size={11} />
           </Link>
         </div>
 
-        {!activeVisits?.length ? (
+        {!queueVisits.length ? (
           <div style={{ padding: '28px 16px', textAlign: 'center' }}>
             <p style={{ margin: 0, fontSize: 13, color: 'var(--text-muted)' }}>No vehicles in shop</p>
             <Link to="/visits/new" className="btn btn-primary btn-sm" style={{ marginTop: 12, textDecoration: 'none', display: 'inline-flex' }}>
@@ -638,8 +619,15 @@ export const Dashboard: React.FC = () => {
                 </tr>
               </thead>
               <tbody>
-                {(activeVisits as Visit[]).map((v, i) => (
-                  <LiveRow key={v.id} visit={v} rank={i + 1} />
+                {queueVisits.map((v, i) => (
+                  <LiveRow
+                    key={v.id}
+                    visit={v}
+                    rank={i + 1}
+                    busy={opsBusy}
+                    onStart={id => startMutation.mutate(id)}
+                    onCheckout={id => checkoutMutation.mutate(id)}
+                  />
                 ))}
               </tbody>
             </table>
@@ -649,13 +637,18 @@ export const Dashboard: React.FC = () => {
 
       {/* Charts + bays */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 280px), 1fr))', gap: 10, marginBottom: 14 }}>
-        {/* Hourly Traffic */}
-        <div className="card" style={{ padding: '12px 14px', border: '1px solid var(--border-light)', borderRadius: 10 }}>
+        {/* Hourly Traffic + live camera */}
+        <div className="card dash-hourly-card" style={{ padding: '12px 14px', border: '1px solid var(--border-light)', borderRadius: 10 }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
             <div style={{ fontSize: 12, fontWeight: 800, color: 'var(--text-primary)' }}>Hourly traffic</div>
-            <div style={{ display: 'flex', gap: 10, fontSize: 9, fontWeight: 700, color: 'var(--text-muted)' }}>
-              <span><span style={{ color: 'var(--text-accent)' }}>—</span> Visits</span>
-              <span><span style={{ color: '#06b6d4' }}>—</span> ANPR</span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+              <div style={{ display: 'flex', gap: 10, fontSize: 9, fontWeight: 700, color: 'var(--text-muted)' }}>
+                <span><span style={{ color: 'var(--text-accent)' }}>—</span> Visits</span>
+                <span><span style={{ color: '#06b6d4' }}>—</span> ANPR</span>
+              </div>
+              <Link to="/visionflow/multicam" className="btn btn-ghost btn-sm" style={{ fontSize: 10, padding: '2px 8px', textDecoration: 'none' }}>
+                Camera wall <ExternalLink size={10} />
+              </Link>
             </div>
           </div>
           <ResponsiveContainer width="100%" height={140}>
@@ -681,27 +674,16 @@ export const Dashboard: React.FC = () => {
                 fill="url(#grad-blue)" dot={false} activeDot={{ r: 5, fill: 'var(--text-accent)', strokeWidth: 0 }} />
             </AreaChart>
           </ResponsiveContainer>
+          <div className="dash-hourly-live-cam">
+            <LiveCameraEmbedPanel />
+          </div>
         </div>
 
-        {/* Bay Status */}
-        <div className="card" style={{ padding: '12px 14px', border: '1px solid var(--border-light)', borderRadius: 10 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-            <div style={{ fontSize: 12, fontWeight: 800, color: 'var(--text-primary)' }}>
-              Bays · {activeBayNums.length}/{stats?.total_bays ?? 5}
-            </div>
-            <span style={{ fontSize: 11, fontWeight: 800, color: 'var(--text-accent)', fontVariantNumeric: 'tabular-nums' }}>
-              {stats?.total_bays ? Math.round((activeBayNums.length / stats.total_bays) * 100) : 0}%
-            </span>
-          </div>
-          <BayMap activeBays={activeBayNums} total={stats?.total_bays ?? 5} />
-          <div style={{ marginTop: 10, paddingTop: 8, borderTop: '1px solid var(--border-light)', display: 'flex', justifyContent: 'space-between', fontSize: 10, color: 'var(--text-muted)' }}>
-            <span>Avg time</span>
-            <span style={{ fontWeight: 700, color: 'var(--text-primary)' }}>{fmtDur(avgTime)}</span>
-          </div>
-        </div>
+        {/* Today: revenue + service duration */}
+        <DashboardTodayOps />
       </div>
 
-      <AnprWidget />
+      <AnprDashboardWidget />
     </div>
   );
 };

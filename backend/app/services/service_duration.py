@@ -1,16 +1,16 @@
 """
 Service duration intelligence.
 
-Canonical shop timing: vehicle entry (visit.entry_time) → supervisor work-order
-sign-off (visit.signature_captured_at). Falls back to exit_time when unsigned.
-Catalog estimated_duration_minutes is a rolling average from signed work orders.
+Canonical shop timing: first camera presence / shop entry until work order
+checkout (Done) or live now for open visits. Supervisor sign-off at issuance
+does NOT end the timer — payment/checkout does.
 """
 from __future__ import annotations
 
 from sqlalchemy.orm import Session, joinedload
 
 from ..models.service import Service, ServiceItem
-from ..models.visit import Visit
+from ..models.visit import Visit, VisitStatus
 from ..utils.helpers import calculate_duration
 from ..utils.qatar_time import qatar_rolling_range_days
 
@@ -18,13 +18,32 @@ DEFAULT_DURATION = 30
 
 
 def visit_shop_duration_minutes(visit: Visit | None) -> float | None:
-    """Minutes from shop entry until supervisor sign-off (or checkout exit)."""
+    """
+    Minutes in shop: camera-tracked ANPR presence when available, else entry → exit/now.
+
+    Camera dwell is authoritative — a work order can stay open for hours while the
+    vehicle is only visible on camera for minutes.
+    """
     if not visit or not visit.entry_time:
         return None
-    end = visit.signature_captured_at or visit.exit_time
-    if not end:
-        return None
-    return calculate_duration(visit.entry_time, end)
+
+    cam_mins: float | None = None
+    if visit.anpr_camera_seconds and float(visit.anpr_camera_seconds) > 0:
+        cam_mins = round(float(visit.anpr_camera_seconds) / 60, 2)
+
+    if cam_mins is not None:
+        return cam_mins
+
+    if visit.exit_time is not None or visit.status == VisitStatus.COMPLETED:
+        end = visit.exit_time
+        if end is not None:
+            wall = calculate_duration(visit.entry_time, end)
+            if wall > 0:
+                return wall
+        stored = visit.duration_minutes
+        return float(stored) if stored and stored > 0 else 0.0
+
+    return calculate_duration(visit.entry_time, None)
 
 
 def visit_service_counts(db: Session) -> dict[int, int]:
@@ -45,18 +64,18 @@ def infer_service_item_minutes(
 ) -> tuple[float | None, str]:
     """
     Return (minutes, source).
-    Priority: line-item measured time → allocated shop entry→sign-off duration.
+    Priority: line-item measured time → allocated shop entry→checkout duration.
     """
-    if item.actual_duration_minutes:
+    if item.actual_duration_minutes and float(item.actual_duration_minutes) > 0:
         return float(item.actual_duration_minutes), "measured"
 
     shop_mins = visit_shop_duration_minutes(visit)
-    if shop_mins is None:
+    if shop_mins is None or shop_mins <= 0:
         return None, "none"
 
     svc_count = visit_service_counts.get(item.visit_id, 1)
     if svc_count == 1:
-        return float(shop_mins), "shop_signature"
+        return float(shop_mins), "shop_presence"
 
     total_est = sum(
         (si.service.estimated_duration_minutes or DEFAULT_DURATION)
@@ -64,10 +83,10 @@ def infer_service_item_minutes(
         if si.service
     )
     if total_est <= 0:
-        return float(shop_mins) / max(svc_count, 1), "shop_signature"
+        return float(shop_mins) / max(svc_count, 1), "shop_presence"
 
     share = (svc.estimated_duration_minutes or DEFAULT_DURATION) / total_est
-    return float(shop_mins) * share, "shop_signature"
+    return float(shop_mins) * share, "shop_presence"
 
 
 def collect_service_duration_samples(
@@ -76,7 +95,7 @@ def collect_service_duration_samples(
     service_id: int | None = None,
     days: int = 365,
 ) -> list[tuple[float, str]]:
-    """Duration samples from work orders with shop timing (signed or checked out)."""
+    """Duration samples from completed work orders with shop timing."""
     if service_id is None:
         return []
 
@@ -92,6 +111,7 @@ def collect_service_duration_samples(
             Service.id == service_id,
             Visit.entry_time >= start_dt,
             Visit.entry_time <= end_dt,
+            Visit.status == VisitStatus.COMPLETED,
         )
         .all()
     )
@@ -99,7 +119,7 @@ def collect_service_duration_samples(
     counts = visit_service_counts(db)
     samples: list[tuple[float, str]] = []
     for item, svc, visit in rows:
-        if not visit.signature_captured_at and not visit.exit_time:
+        if not visit.exit_time and visit.status != VisitStatus.COMPLETED:
             continue
         item.visit = visit
         minutes, source = infer_service_item_minutes(item, svc, visit, counts)
@@ -113,8 +133,8 @@ def compute_average_duration(samples: list[tuple[float, str]]) -> tuple[int | No
         return None, "default"
     avg = round(sum(s[0] for s in samples) / len(samples))
     sources = {s[1] for s in samples}
-    if "shop_signature" in sources:
-        src = "shop_signature"
+    if "shop_presence" in sources:
+        src = "shop_presence"
     elif "measured" in sources:
         src = "measured"
     else:
@@ -147,8 +167,13 @@ def recompute_and_update_service_duration(db: Session, service_id: int) -> int:
 
 def sync_visit_shop_duration(db: Session, visit: Visit) -> None:
     """Persist visit shop duration and refresh catalog averages for its services."""
+    from .camera_presence import recompute_visit_camera_seconds
+
+    if visit.id and visit.status != VisitStatus.COMPLETED:
+        recompute_visit_camera_seconds(db, visit)
+
     mins = visit_shop_duration_minutes(visit)
-    if mins is not None:
+    if mins is not None and mins > 0:
         visit.duration_minutes = mins
 
     if visit.id and not visit.service_items:
@@ -159,9 +184,33 @@ def sync_visit_shop_duration(db: Session, visit: Visit) -> None:
             .first()
         ) or visit
 
-    service_ids = {si.service_id for si in (visit.service_items or [])}
-    for sid in service_ids:
-        recompute_and_update_service_duration(db, sid)
+    if visit.status == VisitStatus.COMPLETED:
+        service_ids = {si.service_id for si in (visit.service_items or [])}
+        for sid in service_ids:
+            recompute_and_update_service_duration(db, sid)
+
+
+def backfill_completed_visit_durations(db: Session) -> int:
+    """Recalculate duration on completed visits (camera-first when ANPR data exists)."""
+    from .camera_presence import recompute_visit_camera_seconds
+
+    rows = (
+        db.query(Visit)
+        .filter(Visit.status == VisitStatus.COMPLETED)
+        .all()
+    )
+    fixed = 0
+    for visit in rows:
+        if visit.id:
+            recompute_visit_camera_seconds(db, visit)
+        mins = visit_shop_duration_minutes(visit)
+        if mins is not None and mins >= 0:
+            if visit.duration_minutes != mins:
+                visit.duration_minutes = mins
+                fixed += 1
+    if fixed:
+        db.commit()
+    return fixed
 
 
 def service_duration_insight(db: Session, service: Service) -> dict:

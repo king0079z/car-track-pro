@@ -8,8 +8,9 @@ import {
   PlayCircle, CheckCircle2, Clock, Loader2, Car, ClipboardList,
   Shield, MapPin, ScanLine, ArrowRight, Printer, ArrowLeft,
   Sparkles, Timer, AlertTriangle, RotateCcw, Edit3, Hash,
+  Wand2, Brain, Star, Package, Lightbulb, TrendingUp,
 } from 'lucide-react';
-import { visitsApi, vehiclesApi, servicesApi, usersApi, anprApi } from '../services/api';
+import { visitsApi, vehiclesApi, servicesApi, anprApi } from '../services/api';
 import { useAuth } from '../contexts/AuthContext';
 import type { Service, ServiceCategory, InShopVehicle } from '../types';
 
@@ -28,13 +29,64 @@ const CAT_CONFIG: Record<ServiceCategory, { color: string; bg: string; label: st
 
 type StepId = 'vehicle' | 'details' | 'services' | 'review' | 'signoff';
 
-const STEPS: { id: StepId; label: string; short: string }[] = [
-  { id: 'vehicle', label: 'Select vehicle', short: 'Vehicle' },
-  { id: 'details', label: 'Customer & vehicle', short: 'Details' },
-  { id: 'services', label: 'Services & staff', short: 'Services' },
-  { id: 'review', label: 'Review order', short: 'Review' },
-  { id: 'signoff', label: 'Supervisor sign-off', short: 'Sign-off' },
+const STEPS: { id: StepId; label: string; short: string; hint: string }[] = [
+  { id: 'vehicle', label: 'Select vehicle', short: 'Vehicle', hint: 'Pick from the live floor or enter a plate' },
+  { id: 'details', label: 'Customer & vehicle', short: 'Details', hint: 'Bay is auto-suggested from camera when available' },
+  { id: 'services', label: 'Services', short: 'Services', hint: 'Use smart picks from visit history when available' },
+  { id: 'review', label: 'Review order', short: 'Review', hint: 'Tap any section below to edit quickly' },
+  { id: 'signoff', label: 'Supervisor sign-off', short: 'Sign-off', hint: 'Sign once — then set status and print' },
 ];
+
+interface HistoryVisit {
+  services?: { service_name: string; price?: number }[];
+  entry_time?: string;
+  visit_number?: string;
+  total_price?: number;
+}
+
+interface SelectedService {
+  id: number;
+  price: number;
+  name: string;
+  duration_minutes?: number;
+}
+
+function findBestBay(
+  suggested: number | null | undefined,
+  occupied: Set<number>,
+  bayCount: number,
+): number | null {
+  if (suggested != null && suggested >= 1 && suggested <= bayCount && !occupied.has(suggested)) {
+    return suggested;
+  }
+  for (let b = 1; b <= bayCount; b += 1) {
+    if (!occupied.has(b)) return b;
+  }
+  return null;
+}
+
+async function mapLastVisitServices(
+  vehicleId: number,
+  svcList: Service[],
+): Promise<SelectedService[]> {
+  const res = await vehiclesApi.history(vehicleId);
+  const visits = (res.data?.visits ?? []) as HistoryVisit[];
+  const last = visits[0];
+  if (!last?.services?.length) return [];
+  const mapped: SelectedService[] = [];
+  for (const s of last.services) {
+    const match = svcList.find(x => x.name === s.service_name);
+    if (match) {
+      mapped.push({
+        id: match.id,
+        price: s.price ?? match.base_price,
+        name: match.name,
+        duration_minutes: match.estimated_duration_minutes,
+      });
+    }
+  }
+  return mapped;
+}
 
 const STATUS_CHIP: Record<string, { label: string; color: string; bg: string }> = {
   waiting: { label: 'Waiting', color: 'var(--text-warning)', bg: 'rgba(252,211,77,0.12)' },
@@ -48,14 +100,6 @@ export interface WorkOrderWizardInitial {
   owner_name?: string;
   owner_phone?: string;
   bay?: string;
-}
-
-interface SelectedService {
-  id: number;
-  price: number;
-  name: string;
-  staff_id?: number;
-  duration_minutes?: number;
 }
 
 interface Props {
@@ -104,6 +148,9 @@ export const WorkOrderWizard: React.FC<Props> = ({
   const [priority, setPriority] = useState(false);
   const [loadingLastOrder, setLoadingLastOrder] = useState(false);
   const [bayAutoLabel, setBayAutoLabel] = useState<string | null>(null);
+  const [draftBanner, setDraftBanner] = useState(false);
+  const [expressBusy, setExpressBusy] = useState<string | null>(null);
+  const [recommendedBay, setRecommendedBay] = useState<number | null>(null);
 
   const [selectedAnprIds, setSelectedAnprIds] = useState<number[]>(() => {
     if (!initial?.detection_id) return [];
@@ -134,10 +181,38 @@ export const WorkOrderWizard: React.FC<Props> = ({
     refetchInterval: 12000,
   });
 
-  const { data: users = [] } = useQuery({
-    queryKey: ['users'],
-    queryFn: () => usersApi.roster().then(r => r.data),
+  const { data: vehicleHistory } = useQuery({
+    queryKey: ['vehicle-history-wo', vehicleData?.id],
+    queryFn: () => vehiclesApi.history(vehicleData.id).then(r => r.data),
+    enabled: !!vehicleData?.id,
   });
+
+  const lastVisit = useMemo(() => {
+    const visits = (vehicleHistory?.visits ?? []) as HistoryVisit[];
+    return visits[0] ?? null;
+  }, [vehicleHistory]);
+
+  const frequentServices = useMemo(() => {
+    const visits = (vehicleHistory?.visits ?? []) as HistoryVisit[];
+    const counts = new Map<string, number>();
+    for (const v of visits.slice(0, 12)) {
+      for (const s of v.services ?? []) {
+        counts.set(s.service_name, (counts.get(s.service_name) ?? 0) + 1);
+      }
+    }
+    return [...counts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 6)
+      .map(([name, count]) => ({ name, count }));
+  }, [vehicleHistory]);
+
+  const detailsReady = useMemo(() => {
+    return Boolean(
+      plate.trim()
+      && (form.customer_name.trim() || form.customer_phone.trim())
+      && (form.make.trim() || form.model.trim()),
+    );
+  }, [plate, form]);
 
   const { activeOnFloor, awaitingWorkOrder, occupiedBays } = useMemo(() => {
     const active = inShopVehicles.filter(v => v.source === 'active_visit');
@@ -148,6 +223,14 @@ export const WorkOrderWizard: React.FC<Props> = ({
     });
     return { activeOnFloor: active, awaitingWorkOrder: pending, occupiedBays: bays };
   }, [inShopVehicles]);
+
+  const freeBayCount = useMemo(() => {
+    let n = 0;
+    for (let b = 1; b <= BAY_COUNT; b += 1) {
+      if (!occupiedBays.has(b)) n += 1;
+    }
+    return n;
+  }, [occupiedBays]);
 
   const { data: anprPlateData } = useQuery({
     queryKey: ['anpr-plate', plate],
@@ -244,8 +327,26 @@ export const WorkOrderWizard: React.FC<Props> = ({
       if (d.selectedServices) setSelectedServices(d.selectedServices);
       if (d.priority) setPriority(d.priority);
       if (d.selectedAnprIds) setSelectedAnprIds(d.selectedAnprIds);
+      if (d.plate || d.selectedServices?.length) setDraftBanner(true);
     } catch { /* ignore */ }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (step !== 'details' || form.assigned_bay) return;
+    const suggested = detectionMeta?.suggested_bay
+      ?? anprUnlinked.find(d => d.suggested_bay)?.suggested_bay
+      ?? null;
+    const best = findBestBay(suggested, occupiedBays, BAY_COUNT);
+    setRecommendedBay(best);
+    if (best != null) {
+      const label = suggested === best && detectionMeta?.camera_name
+        ? `${detectionMeta.camera_name} · Bay ${best}`
+        : best === suggested
+          ? `Camera · Bay ${best}`
+          : `Next free · Bay ${best}`;
+      applySuggestedBay(best, label);
+    }
+  }, [step, form.assigned_bay, detectionMeta, anprUnlinked, occupiedBays, applySuggestedBay]);
 
   useEffect(() => {
     if (initial?.plate && plate.trim() && step === 'vehicle' && !vehicleData && !lookingUp) {
@@ -277,12 +378,40 @@ export const WorkOrderWizard: React.FC<Props> = ({
     if (step !== 'signoff') setSignatureDrawn(false);
   }, [step]);
 
-  const lookupPlate = async (plateOverride?: string) => {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (statusModal || mutation.isPending) return;
+      const tag = (e.target as HTMLElement)?.tagName;
+      const typing = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        handleClose();
+        return;
+      }
+      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+        e.preventDefault();
+        if (step === 'signoff') handleSubmit();
+        else goNext();
+      }
+      if (e.key === 'Enter' && !typing && step === 'vehicle' && plate.trim() && !lookingUp) {
+        e.preventDefault();
+        void lookupPlate();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const lookupPlate = async (
+    plateOverride?: string,
+    opts?: { nextStep?: StepId; loadLastServices?: boolean },
+  ) => {
     const p = (plateOverride ?? plate).trim();
     if (!p) return;
     if (plateOverride) setPlate(plateOverride.toUpperCase());
     setLookingUp(true);
     setError(null);
+    let expressLoaded = false;
     try {
       const res = await vehiclesApi.lookup(p.toUpperCase());
       setVehicleData(res.data);
@@ -298,12 +427,47 @@ export const WorkOrderWizard: React.FC<Props> = ({
         customer_email: res.data.owner_email || f.customer_email,
       }));
       toast.success(`Found — ${res.data.total_visits} previous visit${res.data.total_visits !== 1 ? 's' : ''}`);
+
+      if (opts?.loadLastServices && res.data?.id) {
+        const mapped = await mapLastVisitServices(res.data.id, services as Service[]);
+        if (mapped.length) {
+          setSelectedServices(mapped);
+          setStep(opts.nextStep ?? 'services');
+          toast.success(`Express: loaded ${mapped.length} service${mapped.length !== 1 ? 's' : ''} from last visit`, { icon: '⚡' });
+          expressLoaded = true;
+        }
+      }
     } catch {
       setVehicleData(null);
       toast('New vehicle — fill in details on the next step', { icon: '🆕' });
     } finally {
       setLookingUp(false);
-      setStep('details');
+      if (!expressLoaded) setStep(opts?.nextStep ?? 'details');
+    }
+  };
+
+  const prepareVehicleContext = (v: InShopVehicle) => {
+    setSelectedAnprIds(v.anpr_detection_ids ?? []);
+    if (v.suggested_bay) {
+      applySuggestedBay(v.suggested_bay, v.camera_name);
+    }
+    if (v.customer_name) {
+      setForm(f => ({ ...f, customer_name: v.customer_name || f.customer_name }));
+    }
+  };
+
+  const expressStartWorkOrder = async (v: InShopVehicle) => {
+    if (v.source === 'active_visit' && v.visit_id) {
+      toast(`Work order ${v.work_order_number} is already open`, { icon: '📋' });
+      navigate(`/visits/${v.visit_id}`);
+      return;
+    }
+    setExpressBusy(v.plate_number);
+    prepareVehicleContext(v);
+    try {
+      await lookupPlate(v.plate_number, { loadLastServices: true, nextStep: 'services' });
+    } finally {
+      setExpressBusy(null);
     }
   };
 
@@ -313,13 +477,7 @@ export const WorkOrderWizard: React.FC<Props> = ({
       navigate(`/visits/${v.visit_id}`);
       return;
     }
-    setSelectedAnprIds(v.anpr_detection_ids ?? []);
-    if (v.suggested_bay) {
-      applySuggestedBay(v.suggested_bay, v.camera_name);
-    }
-    if (v.customer_name && !form.customer_name) {
-      setForm(f => ({ ...f, customer_name: v.customer_name || f.customer_name }));
-    }
+    prepareVehicleContext(v);
     await lookupPlate(v.plate_number);
   };
 
@@ -327,23 +485,9 @@ export const WorkOrderWizard: React.FC<Props> = ({
     if (!vehicleData?.id) return;
     setLoadingLastOrder(true);
     try {
-      const res = await vehiclesApi.history(vehicleData.id);
-      const visits = res.data?.visits ?? [];
-      const last = visits[0];
-      if (!last?.services?.length) {
-        toast('No previous services to repeat', { icon: 'ℹ️' });
-        return;
-      }
-      const svcList = services as Service[];
-      const mapped: SelectedService[] = [];
-      for (const s of last.services) {
-        const match = svcList.find(x => x.name === s.service_name);
-        if (match) {
-          mapped.push({ id: match.id, price: s.price ?? match.base_price, name: match.name, duration_minutes: match.estimated_duration_minutes });
-        }
-      }
+      const mapped = await mapLastVisitServices(vehicleData.id, services as Service[]);
       if (!mapped.length) {
-        toast('Could not match previous services to current catalog', { icon: '⚠️' });
+        toast('No previous services to repeat', { icon: 'ℹ️' });
         return;
       }
       setSelectedServices(mapped);
@@ -355,19 +499,39 @@ export const WorkOrderWizard: React.FC<Props> = ({
     }
   };
 
+  const addServiceByName = (name: string) => {
+    const match = (services as Service[]).find(s => s.is_active && s.name === name);
+    if (!match) return;
+    setSelectedServices(prev => {
+      if (prev.find(s => s.id === match.id)) return prev;
+      return [...prev, {
+        id: match.id,
+        price: match.base_price,
+        name: match.name,
+        duration_minutes: match.estimated_duration_minutes,
+      }];
+    });
+  };
+
+  const loadLastVisitBundle = () => {
+    if (!lastVisit?.services?.length) return;
+    let added = 0;
+    for (const s of lastVisit.services) {
+      const match = (services as Service[]).find(x => x.is_active && x.name === s.service_name);
+      if (match && !selectedServices.find(x => x.id === match.id)) {
+        addServiceByName(match.name);
+        added += 1;
+      }
+    }
+    if (added) toast.success(`Added ${added} service${added !== 1 ? 's' : ''} from last visit`);
+    else toast('Services from last visit are already selected', { icon: 'ℹ️' });
+  };
+
   const toggleService = (svc: Service) => {
     setSelectedServices(prev => {
       if (prev.find(s => s.id === svc.id)) return prev.filter(s => s.id !== svc.id);
       return [...prev, { id: svc.id, price: svc.base_price, name: svc.name, duration_minutes: svc.estimated_duration_minutes }];
     });
-  };
-
-  const setServiceStaff = (svcId: number, staffId: number) => {
-    setSelectedServices(prev => prev.map(s => s.id === svcId ? { ...s, staff_id: staffId || undefined } : s));
-  };
-
-  const setServicePrice = (svcId: number, price: number) => {
-    setSelectedServices(prev => prev.map(s => s.id === svcId ? { ...s, price: Math.max(0, price) } : s));
   };
 
   const totalPrice = selectedServices.reduce((s, i) => s + i.price, 0);
@@ -484,7 +648,6 @@ export const WorkOrderWizard: React.FC<Props> = ({
       service_ids: selectedServices.map(s => ({
         service_id: s.id,
         price: s.price,
-        assigned_staff_id: s.staff_id || undefined,
       })),
     });
   };
@@ -496,7 +659,7 @@ export const WorkOrderWizard: React.FC<Props> = ({
       if (status !== 'waiting') {
         await visitsApi.update(statusModal.visitId, {
           status,
-          ...(status === 'completed' ? { exit_time: new Date().toISOString() } : {}),
+          ...(status === 'completed' ? { exit_time: new Date().toISOString(), payment_status: 'paid' } : {}),
         });
       }
       qc.invalidateQueries({ queryKey: ['visits'] });
@@ -507,7 +670,7 @@ export const WorkOrderWizard: React.FC<Props> = ({
         status === 'in_service' ? 'Work order marked in progress' :
         'Work order registered — waiting'
       );
-      navigate(`/visits/${statusModal.visitId}${status === 'waiting' ? '?print=1' : ''}`);
+      navigate(`/visits/${statusModal.visitId}?print=1`);
     } catch {
       toast.error('Could not update status');
     } finally {
@@ -530,6 +693,85 @@ export const WorkOrderWizard: React.FC<Props> = ({
     ...(priority ? [{ k: 'Priority', v: 'Yes', warn: true }] : []),
   ], [plate, form, selectedServices, totalDuration, totalPrice, priority]);
 
+  const summaryRail = (
+    <aside className="wo-wizard-rail" aria-label="Order summary">
+      <div className="wo-rail-card">
+        <div className="wo-rail-head">
+          <Package size={16} />
+          <span>Live summary</span>
+        </div>
+        <div className="wo-rail-plate">{plate.trim() || '—'}</div>
+        <div className="wo-rail-rows">
+          <div className="wo-rail-row">
+            <span>Customer</span>
+            <strong>{form.customer_name || '—'}</strong>
+          </div>
+          <div className="wo-rail-row">
+            <span>Bay</span>
+            <strong>{form.assigned_bay ? `Bay ${form.assigned_bay}` : 'Unassigned'}</strong>
+          </div>
+          <div className="wo-rail-row">
+            <span>Services</span>
+            <strong>{selectedServices.length || '—'}</strong>
+          </div>
+          <div className="wo-rail-row accent">
+            <span>Total</span>
+            <strong>QAR {totalPrice.toLocaleString()}</strong>
+          </div>
+          {totalDuration > 0 && (
+            <div className="wo-rail-row">
+              <span>Est. time</span>
+              <strong>{fmtDuration(totalDuration)}</strong>
+            </div>
+          )}
+        </div>
+        {priority && (
+          <div className="wo-rail-priority"><AlertTriangle size={13} /> Priority order</div>
+        )}
+      </div>
+
+      {step === 'vehicle' && (
+        <div className="wo-rail-card muted">
+          <div className="wo-rail-head"><MapPin size={16} /><span>Shop floor</span></div>
+          <div className="wo-rail-stat-grid">
+            <div><strong>{awaitingWorkOrder.length}</strong><span>Awaiting WO</span></div>
+            <div><strong>{activeOnFloor.length}</strong><span>In service</span></div>
+            <div><strong>{freeBayCount}</strong><span>Bays free</span></div>
+          </div>
+        </div>
+      )}
+
+      {vehicleData && step !== 'vehicle' && (
+        <div className="wo-rail-card intel">
+          <div className="wo-rail-head"><Brain size={16} /><span>Smart insights</span></div>
+          <ul className="wo-rail-insights">
+            <li><Star size={12} /> {vehicleData.total_visits} visit{vehicleData.total_visits !== 1 ? 's' : ''} on file</li>
+            {lastVisit?.entry_time && (
+              <li><Clock size={12} /> Last visit {new Date(lastVisit.entry_time).toLocaleDateString()}</li>
+            )}
+            {lastVisit?.total_price != null && (
+              <li><TrendingUp size={12} /> Last total QAR {lastVisit.total_price.toLocaleString()}</li>
+            )}
+            {frequentServices[0] && (
+              <li><Sparkles size={12} /> Often orders: {frequentServices[0].name}</li>
+            )}
+          </ul>
+          {lastVisit?.services?.length ? (
+            <button type="button" className="wo-rail-action" onClick={() => { void repeatLastOrder(); if (step === 'details') setStep('services'); }}>
+              <RotateCcw size={13} /> Repeat last order
+            </button>
+          ) : null}
+        </div>
+      )}
+
+      <div className="wo-rail-card tip">
+        <Lightbulb size={14} />
+        <p>{STEPS[currentIdx].hint}</p>
+        <span className="wo-rail-kbd">Ctrl+Enter · continue · Esc · save &amp; exit</span>
+      </div>
+    </aside>
+  );
+
   if (mode === 'modal' && !open) return null;
 
   const inner = (
@@ -549,7 +791,7 @@ export const WorkOrderWizard: React.FC<Props> = ({
             <ClipboardList size={22} className="wo-wizard-title-icon" />
             New work order
           </h1>
-          <p>Step {currentIdx + 1} of {STEPS.length} · {STEPS[currentIdx].label}</p>
+          <p>{STEPS[currentIdx].label} — {STEPS[currentIdx].hint}</p>
         </div>
         {mode === 'page' && (
           <button type="button" className="btn btn-secondary btn-sm wo-wizard-cancel-desktop" onClick={handleClose}>
@@ -579,9 +821,23 @@ export const WorkOrderWizard: React.FC<Props> = ({
       </nav>
 
       <div className="wo-wizard-body">
+        {draftBanner && step === 'vehicle' && (
+          <div className="wo-draft-banner">
+            <Clock size={16} />
+            <div>
+              <strong>Draft restored</strong>
+              <span>Your previous work order was saved — continue where you left off.</span>
+            </div>
+            <button type="button" className="wo-draft-dismiss" onClick={() => setDraftBanner(false)} aria-label="Dismiss">
+              <X size={14} />
+            </button>
+          </div>
+        )}
         {error && <div className="wo-wizard-error" role="alert">{error}</div>}
 
-        {/* Step 1 — Vehicle */}
+        <div className="wo-wizard-layout">
+          <div className="wo-wizard-main">
+
         {step === 'vehicle' && (
           <div className="wo-wizard-panel">
             <h2>Select vehicle</h2>
@@ -634,17 +890,28 @@ export const WorkOrderWizard: React.FC<Props> = ({
                       </div>
                       <div className="wo-vehicle-grid">
                         {awaitingWorkOrder.map(v => (
-                          <button key={`anpr-${v.plate_number}`} type="button" className="wo-vehicle-card anpr" onClick={() => void startWorkOrderForVehicle(v)}>
-                            <span className="wo-vehicle-plate">{v.plate_number}</span>
-                            <span className="wo-vehicle-meta">Camera detected · register now</span>
-                            {v.camera_name && (
-                              <span className="wo-vehicle-sub">{v.camera_name}{v.suggested_bay ? ` · Bay ${v.suggested_bay}` : ''}</span>
-                            )}
-                            {(v.make || v.customer_name) && (
-                              <span className="wo-vehicle-sub">{[v.make, v.model].filter(Boolean).join(' ')}{v.customer_name ? ` · ${v.customer_name}` : ''}</span>
-                            )}
-                            <span className="wo-vehicle-action">Start work order <ChevronRight size={12} /></span>
-                          </button>
+                          <div key={`anpr-${v.plate_number}`} className="wo-vehicle-card anpr">
+                            <button type="button" className="wo-vehicle-card-main" onClick={() => void startWorkOrderForVehicle(v)}>
+                              <span className="wo-vehicle-plate">{v.plate_number}</span>
+                              <span className="wo-vehicle-meta">Camera detected · register now</span>
+                              {v.camera_name && (
+                                <span className="wo-vehicle-sub">{v.camera_name}{v.suggested_bay ? ` · Bay ${v.suggested_bay}` : ''}</span>
+                              )}
+                              {(v.make || v.customer_name) && (
+                                <span className="wo-vehicle-sub">{[v.make, v.model].filter(Boolean).join(' ')}{v.customer_name ? ` · ${v.customer_name}` : ''}</span>
+                              )}
+                              <span className="wo-vehicle-action">Full wizard <ChevronRight size={12} /></span>
+                            </button>
+                            <button
+                              type="button"
+                              className="wo-express-btn"
+                              disabled={expressBusy === v.plate_number || lookingUp}
+                              onClick={() => void expressStartWorkOrder(v)}
+                            >
+                              {expressBusy === v.plate_number ? <Loader2 size={14} className="spin" /> : <Wand2 size={14} />}
+                              Express
+                            </button>
+                          </div>
                         ))}
                       </div>
                     </section>
@@ -706,6 +973,16 @@ export const WorkOrderWizard: React.FC<Props> = ({
               </div>
             )}
 
+            {vehicleData && lastVisit?.services?.length ? (
+              <div className="wo-intel-card">
+                <div className="wo-intel-head"><Wand2 size={16} /><span>Express path available</span></div>
+                <p>Returning customer — load their last order and skip straight to services.</p>
+                <button type="button" className="btn btn-secondary btn-sm" onClick={() => { void repeatLastOrder(); setStep('services'); }}>
+                  <RotateCcw size={14} /> Load last order &amp; continue
+                </button>
+              </div>
+            ) : null}
+
             {anprUnlinked.length > 0 && (
               <div className="wo-banner warning">
                 <Zap size={18} />
@@ -739,13 +1016,14 @@ export const WorkOrderWizard: React.FC<Props> = ({
                 {Array.from({ length: BAY_COUNT }, (_, i) => i + 1).map(b => {
                   const occupied = occupiedBays.has(b);
                   const selected = form.assigned_bay === String(b);
+                  const recommended = recommendedBay === b && !selected;
                   return (
                     <button
                       key={b}
                       type="button"
-                      className={`wo-bay-btn${selected ? ' selected' : ''}${occupied && !selected ? ' occupied' : ''}`}
+                      className={`wo-bay-btn${selected ? ' selected' : ''}${occupied && !selected ? ' occupied' : ''}${recommended ? ' recommended' : ''}`}
                       onClick={() => setForm(f => ({ ...f, assigned_bay: String(b) }))}
-                      title={occupied ? 'Bay currently in use' : `Bay ${b}`}
+                      title={occupied ? 'Bay currently in use' : recommended ? `Recommended · Bay ${b}` : `Bay ${b}`}
                     >
                       {b}
                       {occupied && !selected && <span className="wo-bay-dot" />}
@@ -813,6 +1091,16 @@ export const WorkOrderWizard: React.FC<Props> = ({
               <AlertTriangle size={16} />
               <span>Mark as priority — vehicle gets expedited handling</span>
             </label>
+
+            {detailsReady && (
+              <div className="wo-quick-continue">
+                <CheckCircle size={16} />
+                <span>Core details look good — ready for services.</span>
+                <button type="button" className="btn btn-primary btn-sm" onClick={() => setStep('services')}>
+                  Skip to services <ArrowRight size={14} />
+                </button>
+              </div>
+            )}
           </div>
         )}
 
@@ -821,8 +1109,8 @@ export const WorkOrderWizard: React.FC<Props> = ({
           <div className="wo-wizard-panel">
             <div className="wo-services-head">
               <div>
-                <h2>Services &amp; staff</h2>
-                <p className="wo-wizard-lead" style={{ marginBottom: 0 }}>Pick services, adjust pricing, and assign technicians.</p>
+                <h2>Services</h2>
+                <p className="wo-wizard-lead" style={{ marginBottom: 0 }}>Pick services for this work order.</p>
               </div>
               {vehicleData?.id && (
                 <button type="button" className="btn btn-secondary btn-sm" onClick={() => void repeatLastOrder()} disabled={loadingLastOrder}>
@@ -831,6 +1119,35 @@ export const WorkOrderWizard: React.FC<Props> = ({
                 </button>
               )}
             </div>
+
+            {(frequentServices.length > 0 || lastVisit?.services?.length) && (
+              <div className="wo-smart-picks">
+                <div className="wo-intel-head"><Brain size={16} /><span>Smart picks for this vehicle</span></div>
+                <div className="wo-smart-chips">
+                  {lastVisit?.services?.length ? (
+                    <button type="button" className="wo-smart-chip primary" onClick={loadLastVisitBundle}>
+                      <RotateCcw size={12} /> Last visit ({lastVisit.services.length})
+                    </button>
+                  ) : null}
+                  {frequentServices.map(fs => {
+                    const svc = (services as Service[]).find(s => s.is_active && s.name === fs.name);
+                    const selected = svc && selectedServices.some(s => s.id === svc.id);
+                    return (
+                      <button
+                        key={fs.name}
+                        type="button"
+                        className={`wo-smart-chip${selected ? ' on' : ''}`}
+                        onClick={() => addServiceByName(fs.name)}
+                        disabled={!svc}
+                      >
+                        {fs.name}
+                        <span className="wo-smart-count">{fs.count}×</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
 
             <div className="wo-service-toolbar">
               <div className="wo-search-wrap">
@@ -919,43 +1236,6 @@ export const WorkOrderWizard: React.FC<Props> = ({
               })
             )}
 
-            {selectedServices.length > 0 && (
-              <div className="wo-staff-section">
-                <div className="wo-section-divider"><User size={12} /> Staff assignment</div>
-                <div className="wo-staff-list">
-                  {selectedServices.map(s => (
-                    <div key={s.id} className="wo-staff-row">
-                      <div className="wo-staff-row-info">
-                        <span className="wo-staff-name">{s.name}</span>
-                        <div className="wo-staff-price-row">
-                          <span>QAR</span>
-                          <input
-                            type="number"
-                            min={0}
-                            step={1}
-                            className="wo-price-input"
-                            value={s.price}
-                            onChange={e => setServicePrice(s.id, parseFloat(e.target.value) || 0)}
-                          />
-                        </div>
-                      </div>
-                      {(users as any[]).length > 0 && (
-                        <select
-                          className="wo-staff-select"
-                          value={s.staff_id || ''}
-                          onChange={e => setServiceStaff(s.id, Number(e.target.value))}
-                        >
-                          <option value="">Assign staff</option>
-                          {(users as any[]).map((u: any) => (
-                            <option key={u.id} value={u.id}>{u.full_name}</option>
-                          ))}
-                        </select>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
           </div>
         )}
 
@@ -1049,6 +1329,10 @@ export const WorkOrderWizard: React.FC<Props> = ({
             </div>
           </div>
         )}
+
+          </div>
+          {summaryRail}
+        </div>
       </div>
 
       <footer className="wo-wizard-footer">
@@ -1095,9 +1379,9 @@ export const WorkOrderWizard: React.FC<Props> = ({
               <p><strong>{statusModal.visitNumber}</strong> — set status or print</p>
             </div>
             <div className="wo-status-options">
-              <button type="button" disabled={settingStatus} className="wo-status-opt progress" onClick={() => applyStatus('in_service')}>
+              <button type="button" disabled={settingStatus} className="wo-status-opt progress recommended" onClick={() => applyStatus('in_service')}>
                 <PlayCircle size={20} />
-                <div><strong>In progress</strong><span>Work has started</span></div>
+                <div><strong>In progress</strong><span>Recommended · work has started</span></div>
               </button>
               <button type="button" disabled={settingStatus} className="wo-status-opt done" onClick={() => applyStatus('completed')}>
                 <CheckCircle2 size={20} />

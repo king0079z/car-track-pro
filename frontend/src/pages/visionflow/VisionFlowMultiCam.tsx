@@ -19,9 +19,14 @@ import {
 import {
   PlateConfidenceCell,
   PlateTrackStatusBadge,
+  ShopDurationCell,
+  isRegistryQualityRow,
+  isRegistryDisplayRow,
+  registryDisplayRows,
+  shopPresenceSec,
   type VisionFlowVehicleRow,
 } from './VisionFlowPlateQuality';
-import { CameraWifiDialog } from '../../components/CameraWifiDialog';
+import { CameraChangeWifiDialog } from '../../components/CameraChangeWifiDialog';
 
 type VehicleRow = VisionFlowVehicleRow;
 
@@ -32,6 +37,14 @@ interface LiveHealth {
   last_frame_at?: string | null;
   idle?: boolean;
   stream_tier?: 'sd' | 'hd' | null;
+  anpr?: {
+    boxes?: number;
+    tracks_locked?: number;
+    tracks_searching?: number;
+    searching?: boolean;
+    multi_car?: boolean;
+    detect_mode?: string;
+  };
 }
 
 interface JobState {
@@ -113,7 +126,9 @@ const VehicleRegistry: React.FC<{
   jobId?: string | null;
   plateActions?: Record<string, PlateAction>;
 }> = ({ vehicles, compact, jobId, plateActions }) => {
-  const rows = vehicles.filter(v => v.plate && v.plate !== '—' && v.plate !== '…');
+  const rows = registryDisplayRows(vehicles);
+  const verified = rows.filter(isRegistryQualityRow);
+  const scanning = rows.length - verified.length;
   return (
     <div style={{ display: 'flex', flexDirection: 'column', minHeight: 0, flex: compact ? undefined : 1 }}>
       <div style={{ padding: '8px 12px', borderBottom: '1px solid var(--border-light)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: 'var(--bg-elevated)' }}>
@@ -122,7 +137,7 @@ const VehicleRegistry: React.FC<{
         </span>
         {rows.length > 0 && (
           <span style={{ fontSize: 10, color: 'var(--text-muted)', padding: '2px 7px', borderRadius: 99, border: '1px solid var(--border-light)' }}>
-            {rows.length} track{rows.length !== 1 ? 's' : ''}
+            {verified.length} verified{scanning > 0 ? ` · ${scanning} scanning` : ''}
           </span>
         )}
       </div>
@@ -130,7 +145,7 @@ const VehicleRegistry: React.FC<{
         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
           <thead>
             <tr style={{ background: 'var(--bg-surface)' }}>
-              {['#', 'Plate', 'OCR', 'Peak', 'Avg', 'Dwell', 'CarTrack', 'Status'].map(h => (
+              {['#', 'Plate', 'OCR', 'Peak', 'Avg', 'Dwell', 'Duration', 'CarTrack', 'Status'].map(h => (
                 <th key={h} style={{ padding: '6px 8px', textAlign: 'left', fontSize: 9, fontWeight: 700, textTransform: 'uppercase', color: 'var(--text-muted)', borderBottom: '1px solid var(--border-light)', whiteSpace: 'nowrap' }}>{h}</th>
               ))}
             </tr>
@@ -138,15 +153,16 @@ const VehicleRegistry: React.FC<{
           <tbody>
             {rows.length === 0 ? (
               <tr>
-                <td colSpan={8} style={{ textAlign: 'center', padding: '16px 8px', color: 'var(--text-muted)', fontSize: 11 }}>
+                <td colSpan={9} style={{ textAlign: 'center', padding: '16px 8px', color: 'var(--text-muted)', fontSize: 11 }}>
                   Waiting for tracked vehicles…
                 </td>
               </tr>
             ) : rows.map((v, i) => {
+              const verifiedRow = isRegistryQualityRow(v);
               const pa = jobId && plateActions ? plateActions[plateActionKey(jobId, v.plate)] : undefined;
               const linked = pa?.vehicle != null;
               return (
-              <tr key={`${v.track_id}-${i}`} style={{ borderBottom: '1px solid var(--border-light)' }}>
+              <tr key={`${v.plate}-${i}`} style={{ borderBottom: '1px solid var(--border-light)', opacity: verifiedRow ? 1 : 0.85 }}>
                 <td style={{ padding: '6px 8px', color: 'var(--text-muted)' }}>{i + 1}</td>
                 <td style={{ padding: '6px 8px', fontWeight: 700, letterSpacing: '0.05em' }}>{v.plate}</td>
                 <td style={{ padding: '6px 8px' }}>
@@ -161,16 +177,24 @@ const VehicleRegistry: React.FC<{
                 <td style={{ padding: '6px 8px', color: '#3b82f6', fontWeight: 600 }}>{v.speed_kmh_avg ?? '—'}</td>
                 <td style={{ padding: '6px 8px', color: 'var(--text-secondary)' }}>{v.duration_sec != null ? `${v.duration_sec.toFixed(1)}s` : '—'}</td>
                 <td style={{ padding: '6px 8px' }}>
+                  <ShopDurationCell
+                    sec={shopPresenceSec(v)}
+                    active={v.status === 'active'}
+                    paused={Boolean(v.resume_eligible)}
+                    compact
+                  />
+                </td>
+                <td style={{ padding: '6px 8px' }}>
                   {pa ? (
                     <span style={{
                       fontSize: 8, fontWeight: 700, textTransform: 'uppercase', padding: '2px 6px', borderRadius: 99,
-                      background: linked ? 'rgba(16,185,129,0.12)' : 'rgba(245,158,11,0.1)',
-                      color: linked ? '#10b981' : '#f59e0b',
-                      border: `1px solid ${linked ? 'rgba(16,185,129,0.25)' : 'rgba(245,158,11,0.2)'}`,
+                      background: linked ? 'rgba(16,185,129,0.12)' : verifiedRow ? 'rgba(245,158,11,0.1)' : 'rgba(148,163,184,0.12)',
+                      color: linked ? '#10b981' : verifiedRow ? '#f59e0b' : '#94a3b8',
+                      border: `1px solid ${linked ? 'rgba(16,185,129,0.25)' : verifiedRow ? 'rgba(245,158,11,0.2)' : 'rgba(148,163,184,0.2)'}`,
                     }}>
-                      {linked ? 'linked' : pa.detectionId ? 'synced' : '…'}
+                      {linked ? 'linked' : verifiedRow ? (pa.detectionId ? 'synced' : '…') : v.phase === 'reacquiring' ? 're-search' : 'scanning'}
                     </span>
-                  ) : '—'}
+                  ) : verifiedRow ? '…' : 'scanning'}
                 </td>
                 <td style={{ padding: '6px 8px' }}>
                   <PlateTrackStatusBadge status={v.status} resumeEligible={v.resume_eligible} compact />
@@ -244,7 +268,10 @@ const CameraTile: React.FC<{
   busy: boolean;
   isPcCameraPanel: boolean;
   plateActions?: Record<string, PlateAction>;
-}> = ({ slot, sourceDraft, onSourceChange, onToggle, busy, isPcCameraPanel, plateActions }) => {
+  hideSourceConfig?: boolean;
+  hideRegistry?: boolean;
+  embedMode?: boolean;
+}> = ({ slot, sourceDraft, onSourceChange, onToggle, busy, isPcCameraPanel, plateActions, hideSourceConfig, hideRegistry, embedMode }) => {
   const [preview, setPreview] = useState<string | null>(null);
   const [wifiOpen, setWifiOpen] = useState(false);
   const [showIpHint, setShowIpHint] = useState(false);
@@ -265,7 +292,8 @@ const CameraTile: React.FC<{
   const standby = Boolean(running && health?.idle);
   standbyRef.current = standby;
   const streamOk = Boolean(running && health?.stream_connected && health?.last_frame_at && !standby);
-  const plateCount = vehicles.filter(v => v.plate && v.plate !== '—').length;
+  const plateCount = vehicles.filter(v => v.plate && v.plate !== '—' && v.plate !== '…').length;
+  const trackCount = vehicles.filter(v => v.track_id != null && v.track_id >= 0).length;
   const isIpSource = /^rtsp|^http/i.test(sourceDraft.trim());
 
   useEffect(() => {
@@ -318,13 +346,14 @@ const CameraTile: React.FC<{
 
   return (
     <div style={{
-      borderRadius: 16, overflow: 'hidden',
-      border: `1px solid ${isPcCameraPanel ? 'rgba(16,185,129,0.35)' : running ? 'rgba(59,130,246,0.35)' : 'var(--border-light)'}`,
+      borderRadius: embedMode ? 0 : 16,
+      overflow: 'hidden',
+      border: embedMode ? 'none' : `1px solid ${isPcCameraPanel ? 'rgba(16,185,129,0.35)' : running ? 'rgba(59,130,246,0.35)' : 'var(--border-light)'}`,
       background: 'var(--bg-surface)', display: 'flex', flexDirection: 'column', minHeight: 0,
-      boxShadow: isPcCameraPanel && !running ? '0 0 0 1px rgba(16,185,129,0.08)' : undefined,
+      boxShadow: embedMode ? undefined : (isPcCameraPanel && !running ? '0 0 0 1px rgba(16,185,129,0.08)' : undefined),
     }}>
       {/* Header */}
-      <div style={{ padding: '10px 14px', borderBottom: '1px solid var(--border-light)', background: isPcCameraPanel ? 'rgba(16,185,129,0.06)' : 'var(--bg-elevated)' }}>
+      <div style={{ padding: embedMode ? '8px 10px' : '10px 14px', borderBottom: '1px solid var(--border-light)', background: isPcCameraPanel ? 'rgba(16,185,129,0.06)' : 'var(--bg-elevated)' }}>
         <div className="camera-tile-header">
           <div style={{
             width: 32, height: 32, borderRadius: 8, flexShrink: 0,
@@ -348,7 +377,9 @@ const CameraTile: React.FC<{
                 <span style={{ flexShrink: 0, fontSize: 9, fontWeight: 700, padding: '2px 7px', borderRadius: 99, background: 'rgba(59,130,246,0.1)', color: '#3b82f6' }}>DETECTED</span>
               )}
             </div>
-            <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{panelSubtitle(slot.slot, sourceDraft)}</div>
+            {!embedMode && (
+              <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{panelSubtitle(slot.slot, sourceDraft)}</div>
+            )}
           </div>
           <div className="camera-tile-actions">
             {streamOk && (
@@ -369,7 +400,7 @@ const CameraTile: React.FC<{
                 <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#f59e0b', animation: 'vfPulse 2.4s ease-in-out infinite' }} /> STANDBY
               </span>
             )}
-            {slot.wifi_supported && slot.camera_id && (
+            {(slot.wifi_supported || slot.camera_id === 'hero-a1' || (slot.source || '').includes('dahua')) && slot.camera_id && (
               <button type="button" onClick={() => setWifiOpen(true)} title="Change camera Wi-Fi" style={{
                 display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 30, height: 30, borderRadius: 8, flexShrink: 0,
                 border: '1px solid var(--border-light)', background: 'var(--bg-surface)', color: 'var(--text-secondary)', cursor: 'pointer',
@@ -390,7 +421,7 @@ const CameraTile: React.FC<{
         </div>
       </div>
 
-      {/* Source config — always visible; disabled only while feed is running */}
+      {!hideSourceConfig && (
       <div style={{ padding: '12px 14px', borderBottom: '1px solid var(--border-light)', background: 'var(--bg-surface)' }}>
         <div style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-muted)', marginBottom: 8 }}>
           Camera source (USB index or IP / RTSP URL)
@@ -459,9 +490,16 @@ const CameraTile: React.FC<{
           </div>
         )}
       </div>
+      )}
 
       {/* Preview */}
-      <div style={{ position: 'relative', aspectRatio: '16/9', background: '#030407', flexShrink: 0 }}>
+      <div style={{
+        position: 'relative',
+        aspectRatio: '16/9',
+        maxHeight: embedMode ? 200 : undefined,
+        background: '#030407',
+        flexShrink: 0,
+      }}>
         {preview ? (
           <img src={preview} alt={panelTitle(slot.slot, sourceDraft)} style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
         ) : (
@@ -504,14 +542,15 @@ const CameraTile: React.FC<{
               <Activity size={9} style={{ display: 'inline', marginRight: 4 }} />{job?.processed_frames ?? 0} frames
             </span>
             <span style={{ padding: '3px 8px', borderRadius: 6, fontSize: 10, fontWeight: 700, background: 'rgba(0,0,0,0.65)', color: 'var(--text-success)' }}>
-              <Car size={9} style={{ display: 'inline', marginRight: 4 }} />{plateCount} tracks
+              <Car size={9} style={{ display: 'inline', marginRight: 4 }} />{trackCount > 0 ? `${plateCount || 0} plate${plateCount !== 1 ? 's' : ''} · ${trackCount} track${trackCount !== 1 ? 's' : ''}` : `${job?.processed_frames ?? 0} AI frames`}
             </span>
           </div>
         )}
       </div>
 
-      {/* Vehicle registry per panel */}
+      {!hideRegistry && (
       <VehicleRegistry vehicles={vehicles} compact jobId={slot.job_id} plateActions={plateActions} />
+      )}
 
       {job?.status === 'error' && (
         <div style={{ padding: '8px 14px', fontSize: 11, color: '#ef4444', display: 'flex', gap: 6, borderTop: '1px solid var(--border-light)' }}>
@@ -520,7 +559,7 @@ const CameraTile: React.FC<{
       )}
 
       {wifiOpen && slot.camera_id && (
-        <CameraWifiDialog
+        <CameraChangeWifiDialog
           cameraId={slot.camera_id}
           cameraName={panelTitle(slot.slot, sourceDraft)}
           isOpen={wifiOpen}
@@ -574,13 +613,18 @@ export const VisionFlowMultiCam: React.FC = () => {
     }).catch(() => { /* noop */ });
   }, []);
 
+  const anySearching = useMemo(
+    () => grid?.slots.some(s => s.job?.live_health?.anpr?.searching) ?? false,
+    [grid],
+  );
+
   useEffect(() => {
     refreshGrid();
-    // 3s keeps the wall feeling live while cutting backend load ~2.5x vs the
-    // old 1.2s cadence (per-tile snapshots carry the actual video motion).
-    const id = setInterval(refreshGrid, 3000);
+    // Faster registry sync while plates are being re-acquired after a camera move.
+    const ms = anySearching ? 900 : 1800;
+    const id = setInterval(refreshGrid, ms);
     return () => clearInterval(id);
-  }, [refreshGrid]);
+  }, [refreshGrid, anySearching]);
 
   useEffect(() => {
     const st = location.state as { fromCloudConnect?: boolean; liveStarted?: boolean } | null;
@@ -627,11 +671,11 @@ export const VisionFlowMultiCam: React.FC = () => {
   }));
 
   const allVehicles = useMemo(() => {
-    const out: (VehicleRow & { panel: number; panelLabel: string; jobId: string | null })[] = [];
+    const raw: (VehicleRow & { panel: number; panelLabel: string; jobId: string | null })[] = [];
     slots.forEach(s => {
       (s.job?.vehicles ?? []).forEach(v => {
-        if (v.plate && v.plate !== '—') {
-          out.push({
+        if (isRegistryDisplayRow(v)) {
+          raw.push({
             ...v,
             panel: s.slot + 1,
             panelLabel: panelTitle(s.slot, sources[s.slot] ?? String(s.slot)),
@@ -640,7 +684,32 @@ export const VisionFlowMultiCam: React.FC = () => {
         }
       });
     });
-    return out;
+    const byPlate = new Map<string, VehicleRow & { panel: number; panelLabel: string; jobId: string | null; panels: string[] }>();
+    for (const v of raw) {
+      const key = v.plate.replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+      const prev = byPlate.get(key);
+      if (!prev) {
+        byPlate.set(key, { ...v, panels: [v.panelLabel] });
+        continue;
+      }
+      const pick = v.status === 'active' ? v : prev.status === 'active' ? prev : v;
+      byPlate.set(key, {
+        ...pick,
+        panels: [...new Set([...prev.panels, v.panelLabel])],
+        duration_sec: Math.max(prev.duration_sec ?? 0, v.duration_sec ?? 0),
+        presence_duration_sec: Math.max(prev.presence_duration_sec ?? 0, v.presence_duration_sec ?? 0),
+        ocr_confidence: Math.max(prev.ocr_confidence ?? 0, v.ocr_confidence ?? 0),
+        ocr_vote_count: Math.max(prev.ocr_vote_count ?? 0, v.ocr_vote_count ?? 0),
+        status: v.status === 'active' || prev.status === 'active' ? 'active' : pick.status,
+        resume_eligible: v.resume_eligible || prev.resume_eligible,
+        jobId: pick.jobId ?? v.jobId,
+        panel: pick.panel,
+      });
+    }
+    return [...byPlate.values()].map(v => ({
+      ...v,
+      panelLabel: v.panels.join(' · '),
+    }));
   }, [slots, sources]);
 
   const activeJobSlots = useMemo(
@@ -858,14 +927,14 @@ export const VisionFlowMultiCam: React.FC = () => {
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
             <thead>
               <tr style={{ background: 'var(--bg-surface)' }}>
-                {['Panel', 'Plate', 'OCR', 'Peak km/h', 'Avg km/h', 'Dwell', 'Enter', 'CarTrack', 'Status'].map(h => (
+                {['Panel', 'Plate', 'OCR', 'Peak km/h', 'Avg km/h', 'Dwell', 'Duration', 'Enter', 'CarTrack', 'Status'].map(h => (
                   <th key={h} style={{ padding: '10px 12px', textAlign: 'left', fontSize: 10, fontWeight: 700, textTransform: 'uppercase', color: 'var(--text-muted)', borderBottom: '1px solid var(--border-light)', whiteSpace: 'nowrap' }}>{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {allVehicles.length === 0 ? (
-                <tr><td colSpan={9} style={{ textAlign: 'center', padding: 28, color: 'var(--text-muted)' }}>No vehicles tracked yet — start one or more camera feeds above.</td></tr>
+                <tr><td colSpan={10} style={{ textAlign: 'center', padding: 28, color: 'var(--text-muted)' }}>No vehicles tracked yet — start one or more camera feeds above.</td></tr>
               ) : allVehicles.map((v, i) => {
                 const pa = v.jobId ? plateActions[plateActionKey(v.jobId, v.plate)] : undefined;
                 const linked = pa?.vehicle != null;
@@ -883,6 +952,13 @@ export const VisionFlowMultiCam: React.FC = () => {
                   <td style={{ padding: '10px 12px', color: '#f59e0b', fontWeight: 600 }}>{v.speed_kmh_max ?? '—'}</td>
                   <td style={{ padding: '10px 12px', color: '#3b82f6', fontWeight: 600 }}>{v.speed_kmh_avg ?? '—'}</td>
                   <td style={{ padding: '10px 12px' }}>{v.duration_sec != null ? `${v.duration_sec.toFixed(1)}s` : '—'}</td>
+                  <td style={{ padding: '10px 12px' }}>
+                    <ShopDurationCell
+                      sec={shopPresenceSec(v)}
+                      active={v.status === 'active'}
+                      paused={Boolean(v.resume_eligible)}
+                    />
+                  </td>
                   <td style={{ padding: '10px 12px', color: 'var(--text-secondary)' }}>{fmtClock(v.t_enter_sec)}</td>
                   <td style={{ padding: '10px 12px' }}>
                     {pa?.detectionId ? (
@@ -941,5 +1017,85 @@ export const VisionFlowMultiCam: React.FC = () => {
 
       <style>{`@keyframes vfPulse { 0%,100%{opacity:1}50%{opacity:.35} } @keyframes spin { to { transform: rotate(360deg); } }`}</style>
     </div>
+  );
+};
+
+/** Compact live feed for dashboard embed — no source picker UI. */
+export const LiveCameraEmbedPanel: React.FC<{ slot?: number; hideRegistry?: boolean }> = ({
+  slot = 0,
+  hideRegistry = true,
+}) => {
+  const [grid, setGrid] = useState<GridResponse | null>(null);
+  const [source, setSource] = useState('dahua-hero-a1');
+  const [busy, setBusy] = useState(false);
+
+  const refreshGrid = useCallback(async () => {
+    try {
+      const r = await visionflowApi.liveGrid();
+      if (r.ok) setGrid(await r.json());
+    } catch { /* noop */ }
+  }, []);
+
+  useEffect(() => {
+    camerasApi.getHeroLiveSource().then(res => {
+      if (res.data.token) setSource(res.data.token);
+    }).catch(() => { /* keep default */ });
+  }, []);
+
+  useEffect(() => {
+    refreshGrid();
+    const id = setInterval(refreshGrid, 2000);
+    return () => clearInterval(id);
+  }, [refreshGrid]);
+
+  const handleToggle = async (enable: boolean) => {
+    setBusy(true);
+    try {
+      if (enable) {
+        const src = source.trim() || 'dahua-hero-a1';
+        const r = await visionflowApi.gridStart(slot, src, true, true);
+        if (!r.ok) {
+          let detail = 'Could not start camera';
+          try { const j = await r.json(); if (j.detail) detail = String(j.detail); } catch { /* noop */ }
+          toast.error(detail, { duration: 5000 });
+        }
+      } else {
+        await visionflowApi.gridStop(slot);
+      }
+      await refreshGrid();
+    } catch {
+      toast.error('Camera network error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const slots = grid?.slots ?? [];
+  const slotData: GridSlot = slots.find(s => s.slot === slot) ?? {
+    slot,
+    source,
+    label: `Camera ${slot + 1}`,
+    enabled: false,
+    running: false,
+    job_id: null,
+    session_id: null,
+    camera_available: null,
+    job: null,
+  };
+
+  const isPc = slot === 0 && ['0', '', 'webcam', 'default', 'local', 'pc'].includes(source.trim().toLowerCase());
+
+  return (
+    <CameraTile
+      slot={slotData}
+      sourceDraft={source}
+      onSourceChange={setSource}
+      onToggle={enable => void handleToggle(enable)}
+      busy={busy}
+      isPcCameraPanel={isPc}
+      hideSourceConfig
+      hideRegistry={hideRegistry}
+      embedMode
+    />
   );
 };

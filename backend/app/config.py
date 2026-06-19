@@ -44,6 +44,9 @@ class Settings(BaseSettings):
     YOLO11_SPEED_PIPELINE: bool = True
     YOLO11_WEIGHTS: str = ""  # empty → backend/models/best.pt then yolo11_best.pt
     YOLO11_RESIZE_WIDTH: int = 1020
+    # Live cloud SD sub-streams (640p/480p): upscale for YOLO/OCR to match uploaded-video quality.
+    VF_LIVE_SD_MAX_EDGE: int = 960       # native max(w,h) below this → SD path
+    VF_LIVE_SD_INFERENCE_WIDTH: int = 1280  # inference canvas width for SD (LANCZOS upscale)
     YOLO11_ROI_Y_AT_500H: int = 145
     YOLO11_CONF: float = 0.2
     YOLO11_METER_PER_PIXEL: float = 0.05
@@ -133,7 +136,7 @@ class Settings(BaseSettings):
     DAHUA_DEVICE_SERIAL: str = ""  # SN from device QR, e.g. BF0E4C7GAGB833C
     DAHUA_PASSWORD: str = ""  # device password from DMSS (not DMSS email login)
     DAHUA_USERNAME: str = "admin"
-    DAHUA_CONNECTION_MODE: str = "p2p"  # p2p | auto | lan | cartrack_relay | cloud_hls
+    DAHUA_CONNECTION_MODE: str = "cartrack_cloud"  # cartrack_cloud | p2p | auto | lan | cartrack_relay | cloud_hls
     DAHUA_DEVICE_TYPE: str = ""  # optional, e.g. DH-H3A
     DAHUA_HOST: str = ""  # optional LAN IP for auto mode fallback
     DAHUA_STREAM: str = "sub"  # sub | main
@@ -148,7 +151,7 @@ class Settings(BaseSettings):
     IMOU_APP_SECRET: str = ""
     IMOU_BASE_URL: str = "https://openapi-sg.easy4ip.com"
     IMOU_CHANNEL: str = "0"
-    IMOU_PREFER_HD: bool = True  # HD main stream (best plate legibility)
+    IMOU_PREFER_HD: bool = False  # SD sub-stream default (saves Imou media-flow quota)
 
     # ── Adaptive cloud streaming (Imou quota saver) ──────────────────────────
     # Master switch for all cloud-quota protections below. The Imou Open
@@ -171,15 +174,42 @@ class Settings(BaseSettings):
     # the vehicle is close.
     STREAM_HD_ESCALATE_WIDTH_FRAC: float = 0.0
     STREAM_HD_HOLD_SEC: float = 90.0  # stay on HD this long after the last detection
+    STREAM_ANPR_WARMUP_HD_SEC: float = 180.0  # HD for this long after live ANPR starts (bootstrap detections)
     STREAM_TIER_MIN_DWELL_SEC: float = 45.0  # min seconds between SD<->HD switches (anti-flap)
     # Idle / wake (power save): with no detections and no viewer, release the
     # cloud stream and sample one frame on an adaptive interval. A detection in
     # a sample (or someone opening the camera wall) wakes the stream instantly.
     LIVE_IDLE_ENABLED: bool = True
-    LIVE_IDLE_AFTER_SEC: float = 240.0  # no plates this long → enter power save
+    LIVE_IDLE_ON_SD: bool = False  # keep SD sub-stream running full ANPR (no 152s power-save gaps)
+    LIVE_IDLE_AFTER_SEC: float = 240.0  # no plates this long → enter power save (HD only when LIVE_IDLE_ON_SD=false)
     LIVE_IDLE_SAMPLE_BASE_SEC: float = 30.0  # first sampling interval while idle
     LIVE_IDLE_SAMPLE_MAX_SEC: float = 300.0  # sampling interval ceiling (deep idle)
     LIVE_VIEWER_HOLD_SEC: float = 45.0  # recent preview fetch keeps the stream awake this long
+
+    # ── WhatsApp customer notifications (Meta WhatsApp Business Cloud API) ───
+    # Free Meta developer setup: developers.facebook.com → WhatsApp → API setup.
+    # When configured, customers get a WhatsApp message the moment their work
+    # order is completed / checked out (runtime toggle in app Settings).
+    WHATSAPP_ENABLED: bool = False
+    WHATSAPP_ACCESS_TOKEN: str = ""
+    WHATSAPP_PHONE_NUMBER_ID: str = ""
+    WHATSAPP_API_VERSION: str = "v22.0"
+    # Optional approved template name for business-initiated messages
+    # (required by WhatsApp outside the 24h customer-service window).
+    WHATSAPP_TEMPLATE_NAME: str = ""
+    WHATSAPP_FULL_REPORT: bool = True  # send full receipt text even when a template name is set
+    WHATSAPP_DEFAULT_COUNTRY_CODE: str = "974"  # Qatar — prefix for local numbers
+    # Local dev: log the receipt instead of calling Meta (no credentials needed)
+    WHATSAPP_DRY_RUN: bool = False
+
+    # ── Automatic database backups ────────────────────────────────────────────
+    BACKUP_ENABLED: bool = True
+    BACKUP_INTERVAL_HOURS: float = 6.0
+    BACKUP_RETENTION_DAYS: int = 14
+    BACKUP_DIR: str = ""  # empty → {CARTRACK_DATA_DIR or backend}/backups
+
+    # ── Login protection ──────────────────────────────────────────────────────
+    LOGIN_LOCKOUT_MINUTES: float = 15.0  # lockout after max_login_attempts failures
 
     @property
     def cors_origins(self) -> List[str]:

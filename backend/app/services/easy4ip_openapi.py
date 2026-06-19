@@ -44,6 +44,145 @@ _DEFAULT_BASE_URL = "https://openapi-sg.easy4ip.com"
 _HTTP_TIMEOUT = 15.0
 # accessToken is valid 3 days; refresh a little early.
 _TOKEN_REFRESH_MARGIN_SEC = 6 * 3600
+# Imou OP1013 = daily/total API quota exceeded — back off to avoid making it worse.
+_OP1013_BACKOFF_SEC = 4 * 3600.0  # 4h local circuit-breaker after OP1013
+_OPENAPI_QUOTA_UNTIL: dict[str, float] = {}
+_QUOTA_LOCK = threading.Lock()
+
+# ── Quota governor (world-class OP1013 prevention) ───────────────────────────
+# Imou free tier ≈ 30,000 interface calls/month per app (OP1013 = monthly total).
+# Cache + cooldowns stop wizard/debug loops from burning the budget.
+_BIND_CACHE: dict[tuple[str, str], tuple[dict[str, Any], float]] = {}
+_BIND_CACHE_TTL_SEC = 600.0  # 10 min — checkDeviceBindOrNot
+_WIFI_SCAN_CACHE: dict[tuple[str, str], tuple[list[dict[str, Any]], float]] = {}
+_WIFI_SCAN_COOLDOWN_SEC = 300.0  # 5 min between wifiAround scans per camera
+_WIFI_CURRENT_CACHE: dict[tuple[str, str], tuple[dict[str, Any], float]] = {}
+_WIFI_CURRENT_TTL_SEC = 120.0
+_CALL_STATS: dict[str, int] = {}  # app_id -> calls since process start
+_METHOD_STATS: dict[tuple[str, str], int] = {}  # (app_id, method) -> count
+
+
+def _imou_quota_state_path() -> str | None:
+    data_dir = os.environ.get("CARTRACK_DATA_DIR", "").strip()
+    if data_dir and os.path.isdir(data_dir):
+        return os.path.join(data_dir, "imou_quota.json")
+    return None
+
+
+def _load_imou_quota_state() -> None:
+    path = _imou_quota_state_path()
+    if not path or not os.path.isfile(path):
+        return
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        if not isinstance(data, dict):
+            return
+        until = data.get("blocked_until")
+        app_id = str(data.get("app_id") or "").strip()
+        if app_id and isinstance(until, (int, float)) and float(until) > time.time():
+            with _QUOTA_LOCK:
+                _OPENAPI_QUOTA_UNTIL[app_id] = float(until)
+    except Exception:
+        pass
+
+
+def _save_imou_quota_state(app_id: str, blocked_until: float) -> None:
+    path = _imou_quota_state_path()
+    if not path:
+        return
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({"app_id": app_id, "blocked_until": blocked_until}, fh)
+    except Exception:
+        pass
+
+
+_load_imou_quota_state()
+
+
+def _record_api_call(app_id: str, method: str) -> None:
+    with _QUOTA_LOCK:
+        _CALL_STATS[app_id] = _CALL_STATS.get(app_id, 0) + 1
+        key = (app_id, method)
+        _METHOD_STATS[key] = _METHOD_STATS.get(key, 0) + 1
+
+
+def openapi_usage_stats(app_id: str | None = None) -> dict[str, Any]:
+    """Lightweight usage snapshot for Settings UI / ops."""
+    aid = (app_id or "").strip()
+    with _QUOTA_LOCK:
+        blocked = max(0.0, _OPENAPI_QUOTA_UNTIL.get(aid, 0) - time.time()) if aid else 0.0
+        calls = _CALL_STATS.get(aid, 0) if aid else sum(_CALL_STATS.values())
+        top_methods = sorted(
+            ((m, c) for (a, m), c in _METHOD_STATS.items() if not aid or a == aid),
+            key=lambda x: x[1],
+            reverse=True,
+        )[:8]
+    return {
+        "app_id": aid or None,
+        "blocked_sec": round(blocked),
+        "blocked": blocked > 0,
+        "calls_since_start": calls,
+        "top_methods": [{"method": m, "count": c} for m, c in top_methods],
+        "free_tier_hint": (
+            "Imou free tier is ~30,000 API calls/month per developer app. "
+            "Use CarTrack Cloud for video (no Imou calls). Wi-Fi scan is cached 5 min."
+        ),
+        "recovery": (
+            "Quota resets on the 1st of each month, or top up at open.imoulife.com → My Resources."
+            if blocked <= 0
+            else f"Local backoff active — wait {max(1, int(blocked / 60))} min before retrying."
+        ),
+    }
+
+
+def cached_check_bound(client: Easy4IpOpenAPI, serial: str, *, force: bool = False) -> dict[str, Any]:
+    """checkDeviceBindOrNot with 10-minute cache (saves quota during wizard retries)."""
+    key = (client.app_id, serial.upper())
+    now = time.monotonic()
+    if not force:
+        with _QUOTA_LOCK:
+            hit = _BIND_CACHE.get(key)
+            if hit and now < hit[1]:
+                return dict(hit[0])
+    status = client.check_bound(serial)
+    with _QUOTA_LOCK:
+        _BIND_CACHE[key] = (dict(status), now + _BIND_CACHE_TTL_SEC)
+    return status
+
+
+def invalidate_bind_cache(app_id: str, serial: str) -> None:
+    with _QUOTA_LOCK:
+        _BIND_CACHE.pop((app_id, serial.upper()), None)
+
+
+def openapi_quota_remaining(app_id: str) -> float:
+    """Seconds until Imou OpenAPI calls are allowed again after OP1013."""
+    with _QUOTA_LOCK:
+        return max(0.0, _OPENAPI_QUOTA_UNTIL.get(app_id, 0) - time.time())
+
+
+def _openapi_quota_record(app_id: str) -> None:
+    until = time.time() + _OP1013_BACKOFF_SEC
+    with _QUOTA_LOCK:
+        _OPENAPI_QUOTA_UNTIL[app_id] = until
+    _save_imou_quota_state(app_id, until)
+    _log.warning(
+        "Imou OP1013 — API quota exceeded for app %s…; blocking Imou calls for %.0fh",
+        app_id[:8],
+        _OP1013_BACKOFF_SEC / 3600.0,
+    )
+
+
+def op1013_user_message(retry_sec: float | None = None) -> str:
+    wait = retry_sec if retry_sec is not None else _OP1013_BACKOFF_SEC
+    mins = max(1, int(wait / 60))
+    return (
+        "Imou developer API quota exceeded (OP1013). "
+        f"Wait about {mins} minute(s), or use CarTrack Cloud for video (no Imou calls). "
+        "Free tier is ~30,000 calls/month per app — resets on the 1st."
+    )
 
 
 class Easy4IpError(RuntimeError):
@@ -75,6 +214,9 @@ class Easy4IpOpenAPI:
         return hashlib.md5(raw.encode("utf-8")).hexdigest()
 
     def _post(self, method: str, params: dict[str, Any], *, timeout: float | None = None) -> dict[str, Any]:
+        wait = openapi_quota_remaining(self.app_id)
+        if wait > 0:
+            raise Easy4IpError(op1013_user_message(wait), code="OP1013", method=method)
         ts = int(time.time())
         nonce = str(uuid.uuid4())
         body = {
@@ -107,7 +249,11 @@ class Easy4IpOpenAPI:
         code = str(result.get("code") or "")
         if code and code != "0":
             msg = str(result.get("msg") or "unknown error")
+            if code == "OP1013":
+                _openapi_quota_record(self.app_id)
+                raise Easy4IpError(op1013_user_message(), code=code, method=method)
             raise Easy4IpError(f"{method} -> {code}: {msg}", code=code, method=method)
+        _record_api_call(self.app_id, method)
         return result.get("data") or {}
 
     # ---- auth ----------------------------------------------------------------
@@ -121,8 +267,16 @@ class Easy4IpOpenAPI:
             token = str(data.get("accessToken") or "")
             if not token:
                 raise Easy4IpError("accessToken: empty token in response", method="accessToken")
-            expire = float(data.get("expireTime") or (now + 3 * 86400))
-            # expireTime is an absolute epoch (seconds) per docs.
+            exp_raw = float(data.get("expireTime") or 0)
+            # expireTime is RELATIVE seconds (e.g. 259200 = 3 days) in practice;
+            # treating it as an absolute epoch made every token look expired and
+            # forced a re-auth on each call (OP1026 rate-limit storms).
+            if exp_raw <= 0:
+                expire = now + 3 * 86400
+            elif exp_raw < now - 86400:  # too small to be an epoch → relative
+                expire = now + exp_raw
+            else:
+                expire = exp_raw
             self._token = token
             self._token_expiry = max(now + 60, expire - _TOKEN_REFRESH_MARGIN_SEC)
             _log.info("Easy4IP accessToken acquired (expires ~%.0fh)", (expire - now) / 3600.0)
@@ -261,6 +415,17 @@ class Easy4IpOpenAPI:
         )
         streams = data.get("streams")
         return streams if isinstance(streams, list) else []
+
+    def get_live_info_raw(self, device_id: str, channel: str = "0") -> dict[str, Any]:
+        """Full getLiveStreamInfo payload (includes liveToken when present)."""
+        return self._post_auth(
+            "getLiveStreamInfo", {"deviceId": device_id, "channelId": str(channel)}
+        )
+
+    def unbind_live(self, live_token: str) -> dict[str, Any]:
+        """Destroy a live address so a fresh one can be created (cloud session
+        recovery — used when the HLS playlist starts serving errorcode segments)."""
+        return self._post_auth("unbindLive", {"liveToken": str(live_token)})
 
     def _safe_stream_info(self, device_id: str, channel: str) -> list[dict[str, Any]]:
         """getLiveStreamInfo, treating LV1002 'live does not exist' as empty."""
@@ -433,7 +598,7 @@ def ensure_device_bound(cfg: dict[str, Any]) -> dict[str, Any]:
         return {"ok": False, "error": "Camera serial number is required."}
     password = str(cfg.get("password") or "").strip()
     try:
-        status = client.check_bound(serial)
+        status = cached_check_bound(client, serial)  # type: ignore[arg-type]
         if status.get("isMine"):
             return {"ok": True, "bound": True, "mine": True}
         if status.get("isBind"):
@@ -442,13 +607,16 @@ def ensure_device_bound(cfg: dict[str, Any]) -> dict[str, Any]:
                 "bound": True,
                 "mine": False,
                 "error": (
-                    "This camera is bound to another account (e.g. DMSS / Imou Life). "
-                    "Remove/unbind it there first, then add it here."
+                    "This camera is registered in DMSS or Imou Life on your phone. "
+                    "CarTrack uses a separate cloud developer account — remove the device "
+                    "from the DMSS/Imou app first (Delete device), wait ~1 minute, then "
+                    "reconnect here with the same admin password."
                 ),
             }
         if not password:
             return {"ok": False, "error": "Device password is required to bind the camera to the cloud app."}
         client.bind_device(serial, password)
+        invalidate_bind_cache(client.app_id, serial)
         return {"ok": True, "bound": True, "mine": True, "just_bound": True}
     except Easy4IpError as exc:
         hint = ""
@@ -474,12 +642,25 @@ def easy4ip_wifi_current(cfg: dict[str, Any]) -> dict[str, Any]:
     client, serial, err = _wifi_client_serial(cfg)
     if err:
         return {"ok": False, "error": err}
+    key = (client.app_id, serial)  # type: ignore[union-attr]
+    now = time.monotonic()
+    with _QUOTA_LOCK:
+        hit = _WIFI_CURRENT_CACHE.get(key)
+        if hit and now < hit[1]:
+            return {"ok": True, "cached": True, **hit[0]}
     try:
         data = client.current_device_wifi(serial)  # type: ignore[union-attr]
-        return {"ok": True, "ssid": data.get("ssid"), "linkEnable": data.get("linkEnable"),
-                "intensity": data.get("intensity")}
+        out = {
+            "ssid": data.get("ssid"),
+            "linkEnable": data.get("linkEnable"),
+            "intensity": data.get("intensity"),
+        }
+        with _QUOTA_LOCK:
+            _WIFI_CURRENT_CACHE[key] = (dict(out), now + _WIFI_CURRENT_TTL_SEC)
+        return {"ok": True, **out}
     except Easy4IpError as exc:
-        return {"ok": False, "error": str(exc), "code": exc.code}
+        err = op1013_user_message() if exc.code == "OP1013" else str(exc)
+        return {"ok": False, "error": err, "code": exc.code}
 
 
 def easy4ip_wifi_scan(cfg: dict[str, Any]) -> dict[str, Any]:
@@ -487,6 +668,17 @@ def easy4ip_wifi_scan(cfg: dict[str, Any]) -> dict[str, Any]:
     client, serial, err = _wifi_client_serial(cfg)
     if err:
         return {"ok": False, "error": err}
+    key = (client.app_id, serial)  # type: ignore[union-attr]
+    now = time.monotonic()
+    with _QUOTA_LOCK:
+        hit = _WIFI_SCAN_CACHE.get(key)
+        if hit and now < hit[1]:
+            return {
+                "ok": True,
+                "networks": list(hit[0]),
+                "cached": True,
+                "retry_after_sec": max(0, int(hit[1] - now)),
+            }
     try:
         nets = client.wifi_around(serial)  # type: ignore[union-attr]
         out = [
@@ -506,9 +698,13 @@ def easy4ip_wifi_scan(cfg: dict[str, Any]) -> dict[str, Any]:
             cur = best.get(ssid)
             if cur is None or (int(n.get("intensity") or 0) > int(cur.get("intensity") or 0)):
                 best[ssid] = n
-        return {"ok": True, "networks": list(best.values())}
+        result_nets = list(best.values())
+        with _QUOTA_LOCK:
+            _WIFI_SCAN_CACHE[key] = (result_nets, now + _WIFI_SCAN_COOLDOWN_SEC)
+        return {"ok": True, "networks": result_nets, "cached": False}
     except Easy4IpError as exc:
-        return {"ok": False, "error": str(exc), "code": exc.code}
+        err = op1013_user_message() if exc.code == "OP1013" else str(exc)
+        return {"ok": False, "error": err, "code": exc.code}
 
 
 def easy4ip_wifi_set(cfg: dict[str, Any], ssid: str, bssid: str, password: str = "") -> dict[str, Any]:
@@ -520,9 +716,13 @@ def easy4ip_wifi_set(cfg: dict[str, Any], ssid: str, bssid: str, password: str =
         return {"ok": False, "error": "Wi-Fi SSID is required."}
     try:
         client.control_device_wifi(serial, ssid, bssid, password)  # type: ignore[union-attr]
+        with _QUOTA_LOCK:
+            _WIFI_CURRENT_CACHE.pop((client.app_id, serial), None)  # type: ignore[union-attr]
+            _WIFI_SCAN_CACHE.pop((client.app_id, serial), None)  # type: ignore[union-attr]
         return {"ok": True, "ssid": ssid}
     except Easy4IpError as exc:
-        return {"ok": False, "error": str(exc), "code": exc.code}
+        err = op1013_user_message() if exc.code == "OP1013" else str(exc)
+        return {"ok": False, "error": err, "code": exc.code}
 
 
 def easy4ip_ptz(cfg: dict[str, Any], operation: str, duration_ms: int = 500) -> dict[str, Any]:
@@ -538,7 +738,18 @@ def easy4ip_ptz(cfg: dict[str, Any], operation: str, duration_ms: int = 500) -> 
         client.control_move_ptz(serial, operation, duration_ms, channel)
         return {"ok": True, "operation": operation, "duration_ms": int(duration_ms)}
     except Easy4IpError as exc:
-        return {"ok": False, "error": str(exc), "code": exc.code}
+        err = op1013_user_message() if exc.code == "OP1013" else str(exc)
+        return {"ok": False, "error": err, "code": exc.code}
+
+
+def hls_backoff_remaining(cfg: dict[str, Any]) -> float:
+    """Seconds until the next Easy4IP HLS resolve is allowed (0 = now)."""
+    client = get_openapi_client(cfg)
+    serial = str(cfg.get("device_serial") or "").strip()
+    if not client or not serial:
+        return 0.0
+    channel = str(cfg.get("openapi_channel") or cfg.get("channel") or "0").strip()
+    return _hls_fail_blocked((client.base_url, serial, channel))
 
 
 def resolve_easy4ip_hls(
@@ -598,4 +809,67 @@ def resolve_easy4ip_hls(
         )
     else:
         _hls_fail_record(fail_key)
+    return url
+
+
+_RECREATE_LAST: dict[str, float] = {}
+_RECREATE_COOLDOWN_SEC = 300.0
+
+
+def recreate_easy4ip_live(cfg: dict[str, Any]) -> str | None:
+    """Destroy and re-create the cloud live session for a camera.
+
+    The live address from bindDeviceLive is persistent: when the cloud session
+    breaks server-side, the playlist keeps resolving but serves errorcode
+    segments forever, and a plain re-resolve returns the same dead URL. The
+    only recovery is unbindLive + bindDeviceLive. Rate-limited so reconnect
+    loops cannot trigger OP1026 (API request flood).
+    """
+    client = get_openapi_client(cfg)
+    serial = str(cfg.get("device_serial") or "").strip()
+    if client is None or not serial:
+        return None
+    now = time.time()
+    last = _RECREATE_LAST.get(serial, 0.0)
+    if now - last < _RECREATE_COOLDOWN_SEC:
+        _log.info(
+            "Easy4IP live recreate for %s suppressed (cooldown %.0fs left)",
+            serial, _RECREATE_COOLDOWN_SEC - (now - last),
+        )
+        return None
+    _RECREATE_LAST[serial] = now
+    channel = str(cfg.get("openapi_channel") or cfg.get("channel") or "0").strip()
+    prefer_hd = bool(cfg.get("openapi_prefer_hd", True))
+
+    tokens: set[str] = set()
+    try:
+        raw = client.get_live_info_raw(serial, channel)
+        if raw.get("liveToken"):
+            tokens.add(str(raw["liveToken"]))
+        for s in raw.get("streams") or []:
+            if isinstance(s, dict) and s.get("liveToken"):
+                tokens.add(str(s["liveToken"]))
+    except Easy4IpError as exc:
+        if exc.code != "LV1002":  # "live does not exist" — nothing to destroy
+            _log.warning("Easy4IP live info before recreate failed: %s", exc)
+
+    for tok in tokens:
+        try:
+            client.unbind_live(tok)
+            _log.info("Easy4IP live %s destroyed for recreate", tok[:12])
+        except Easy4IpError as exc:
+            _log.warning("Easy4IP unbindLive failed (continuing): %s", exc)
+
+    for stream_id in (0, 1):
+        try:
+            client.bind_device_live(serial, channel, stream_id)
+        except Easy4IpError as exc:
+            if exc.code != "LV1001":
+                _log.warning("Easy4IP bindDeviceLive(%s) failed: %s", stream_id, exc)
+
+    invalidate_hls_cache(cfg)
+    with _HLS_LOCK:
+        _HLS_FAIL.pop((client.base_url, serial, channel), None)
+    url = resolve_easy4ip_hls(cfg, prefer_hd_override=prefer_hd)
+    _log.info("Easy4IP live recreated for %s -> %s", serial, "OK" if url else "FAILED")
     return url

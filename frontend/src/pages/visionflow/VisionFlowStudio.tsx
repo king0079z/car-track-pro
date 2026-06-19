@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import {
   Upload, History, DownloadCloud, FileText, X,
@@ -13,6 +13,10 @@ import { DahuaHeroA1Panel } from '../settings/DahuaHeroA1Panel';
 import {
   PlateConfidenceCell,
   PlateTrackStatusBadge,
+  ShopDurationCell,
+  isRegistryQualityRow,
+  registryDisplayRows,
+  shopPresenceSec,
   type VisionFlowVehicleRow,
 } from './VisionFlowPlateQuality';
 
@@ -614,7 +618,10 @@ export const VisionFlowStudio: React.FC = () => {
   );
   const liveIndeterminate = Boolean(running && isLiveSession && job?.progress == null);
   const progress = Math.max(0, Math.min(100, Number(job?.progress ?? 0)));
-  const vehicleCount = job?.vehicles?.length ?? 0;
+  const registryRows = useMemo(() => registryDisplayRows(job?.vehicles ?? []), [job?.vehicles]);
+  const verifiedRows = useMemo(() => registryRows.filter(isRegistryQualityRow), [registryRows]);
+  const vehicleCount = verifiedRows.length;
+  const scanningCount = registryRows.length - verifiedRows.length;
   const showPreviewPanel = Boolean(running || previewSrc);
   const fps = job?.video_fps && job.video_fps > 0 ? job.video_fps : (job?.analyze_options?.probe_video_fps ?? null);
   const statusMeta = done
@@ -913,7 +920,7 @@ export const VisionFlowStudio: React.FC = () => {
               <StatPill icon={<Activity size={14} color="#3b82f6" />} label="Frames" value={job.total_frames_est > 0 ? `${job.processed_frames} / ${job.total_frames_est}` : String(job.processed_frames)} />
               {fps && fps > 0 && <StatPill icon={<Video size={14} color="#8b5cf6" />} label="Source FPS" value={`${(+fps).toFixed(2)} fps`} color="#8b5cf6" />}
               <StatPill icon={<TrendingUp size={14} color="#10b981" />} label="Tracks" value={vehicleCount} color="#10b981" />
-              {vehicleCount > 0 && (() => { const p = Math.max(...job.vehicles.map(v => v.speed_kmh_max ?? 0)); return p > 0 ? <StatPill icon={<Gauge size={14} color="#f59e0b" />} label="Peak speed" value={`${p} km/h`} color="#f59e0b" /> : null; })()}
+              {vehicleCount > 0 && (() => { const p = Math.max(...registryRows.map(v => v.speed_kmh_max ?? 0)); return p > 0 ? <StatPill icon={<Gauge size={14} color="#f59e0b" />} label="Peak speed" value={`${p} km/h`} color="#f59e0b" /> : null; })()}
               {syncStatus === 'done' && <StatPill icon={<Link2 size={14} color="#06b6d4" />} label="DB linked" value={`${linkedCount} / ${synced.length}`} color="#06b6d4" />}
             </div>
           )}
@@ -923,25 +930,26 @@ export const VisionFlowStudio: React.FC = () => {
             <div style={{ borderRadius: 14, overflow: 'hidden', border: '1px solid var(--border-light)', background: 'var(--bg-surface)', display: 'flex', flexDirection: 'column' }}>
               <div style={{ padding: '10px 16px', borderBottom: '1px solid var(--border-light)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0 }}>
                 <span style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.07em', color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: 6 }}><Eye size={12} /> Vehicle registry</span>
-                {vehicleCount > 0 && <span style={{ fontSize: 10.5, color: 'var(--text-muted)', padding: '2px 8px', borderRadius: 99, background: 'var(--bg-elevated)', border: '1px solid var(--border-light)' }}>{vehicleCount} track{vehicleCount !== 1 ? 's' : ''}</span>}
+                {vehicleCount > 0 && <span style={{ fontSize: 10.5, color: 'var(--text-muted)', padding: '2px 8px', borderRadius: 99, background: 'var(--bg-elevated)', border: '1px solid var(--border-light)' }}>{vehicleCount} track{vehicleCount !== 1 ? 's' : ''}{scanningCount > 0 ? ` · ${scanningCount} scanning` : ''}</span>}
               </div>
               <div className="table-scroll" style={{ overflowY: 'auto', maxHeight: 320, flex: 1 }}>
                 <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
                   <thead>
                     <tr style={{ background: 'var(--bg-elevated)' }}>
-                      {['#', 'ID', 'Plate', 'OCR', 'Peak', 'Avg', 'Last', 'Enter', 'Exit', 'Dwell', 'DB', 'Status'].map((h, hi) => (
+                      {['#', 'ID', 'Plate', 'OCR', 'Peak', 'Avg', 'Last', 'Enter', 'Exit', 'Dwell', 'Duration', 'DB', 'Status'].map((h, hi) => (
                         <th key={h || `col-${hi}`} style={{ padding: '8px 10px', textAlign: 'left', fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--text-muted)', borderBottom: '1px solid var(--border-light)', whiteSpace: 'nowrap' }}>{h}</th>
                       ))}
                     </tr>
                   </thead>
                   <tbody>
-                    {vehicleCount === 0 ? (
-                      <tr><td colSpan={12} style={{ textAlign: 'center', padding: '24px 0', color: 'var(--text-muted)', fontSize: 12 }}>Waiting for tracked vehicles…</td></tr>
-                    ) : job.vehicles.map((v, i) => {
+                    {registryRows.length === 0 ? (
+                      <tr><td colSpan={13} style={{ textAlign: 'center', padding: '24px 0', color: 'var(--text-muted)', fontSize: 12 }}>Waiting for tracked vehicles…</td></tr>
+                    ) : registryRows.map((v, i) => {
+                      const verifiedRow = isRegistryQualityRow(v);
                       const pa = plateActions[v.plate];
                       const isLinked = pa?.vehicle !== null && pa !== undefined;
                       return (
-                        <tr key={`${v.track_id ?? 'n'}-${v.status}-${v.first_frame ?? 0}-${i}`} style={{ borderBottom: '1px solid var(--border-light)' }}
+                        <tr key={`${v.plate ?? 'n'}-${v.status}-${i}`} style={{ borderBottom: '1px solid var(--border-light)', opacity: verifiedRow ? 1 : 0.88 }}
                           onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-elevated)')}
                           onMouseLeave={e => (e.currentTarget.style.background = '')}>
                           <td style={{ padding: '8px 10px', color: 'var(--text-muted)' }}>{i + 1}</td>
@@ -960,6 +968,13 @@ export const VisionFlowStudio: React.FC = () => {
                           <td style={{ padding: '8px 10px', fontVariantNumeric: 'tabular-nums', color: 'var(--text-secondary)' }}>{fmtClock(v.t_enter_sec)}</td>
                           <td style={{ padding: '8px 10px', fontVariantNumeric: 'tabular-nums', color: 'var(--text-secondary)' }}>{fmtClock(v.t_exit_sec)}</td>
                           <td style={{ padding: '8px 10px', fontVariantNumeric: 'tabular-nums', color: 'var(--text-secondary)' }}>{v.duration_sec != null ? v.duration_sec.toFixed(2) + 's' : '—'}</td>
+                          <td style={{ padding: '8px 10px', fontVariantNumeric: 'tabular-nums' }}>
+                            <ShopDurationCell
+                              sec={shopPresenceSec(v)}
+                              active={v.status === 'active'}
+                              paused={Boolean(v.resume_eligible)}
+                            />
+                          </td>
                           <td style={{ padding: '8px 10px' }}>
                             {syncStatus === 'done' && pa ? (
                               <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3, padding: '2px 7px', borderRadius: 99, fontSize: 9.5, fontWeight: 700, textTransform: 'uppercase', background: isLinked ? 'rgba(16,185,129,0.12)' : 'rgba(245,158,11,0.1)', color: isLinked ? '#10b981' : '#f59e0b', border: `1px solid ${isLinked ? 'rgba(16,185,129,0.25)' : 'rgba(245,158,11,0.2)'}` }}>

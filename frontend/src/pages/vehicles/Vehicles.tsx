@@ -8,8 +8,11 @@ import {
   ScanLine, ArrowRight, RefreshCw, Gauge,
   LayoutGrid, List, Eye, LayoutDashboard, BarChart2,
   ChevronDown, ArrowUpDown, ArrowUp, ArrowDown, Layers, Mail, Phone,
+  GitMerge, PenLine,
 } from 'lucide-react';
-import { vehiclesApi } from '../../services/api';
+import { vehiclesApi, visitsApi } from '../../services/api';
+import { OpsQuickNav } from '../../components/ops/OpsQuickNav';
+import { useAuth } from '../../contexts/AuthContext';
 import { fmtQatar, qatarYmd } from '../../lib/qatarTime';
 import toast from 'react-hot-toast';
 import type { Vehicle } from '../../types';
@@ -61,7 +64,9 @@ const SortIcon: React.FC<{ active: boolean; dir: SortDir }> = ({ active, dir }) 
 const VehicleExpandPanel: React.FC<{
   vehicle: Vehicle;
   onDelete: () => void;
-}> = ({ vehicle, onDelete }) => {
+  onFixPlate: () => void;
+  canDelete: boolean;
+}> = ({ vehicle, onDelete, onFixPlate, canDelete }) => {
   const tc = TYPE_COLORS[vehicle.vehicle_type || 'other'] || '#94a3b8';
   const colorDot = COLOR_DOTS[vehicle.color?.toLowerCase() || ''];
   return (
@@ -146,9 +151,19 @@ const VehicleExpandPanel: React.FC<{
           >
             <Plus size={13} /> New visit
           </Link>
-          <button type="button" className="btn btn-danger btn-sm" onClick={e => { e.stopPropagation(); onDelete(); }}>
-            <Trash2 size={13} /> Delete
+          <button
+            type="button"
+            className="btn btn-secondary btn-sm"
+            title="Correct an OCR-misread plate"
+            onClick={e => { e.stopPropagation(); onFixPlate(); }}
+          >
+            <PenLine size={13} /> Fix plate
           </button>
+          {canDelete && (
+            <button type="button" className="btn btn-danger btn-sm" onClick={e => { e.stopPropagation(); onDelete(); }}>
+              <Trash2 size={13} /> Delete
+            </button>
+          )}
         </div>
       </div>
     </div>
@@ -156,7 +171,7 @@ const VehicleExpandPanel: React.FC<{
 };
 
 /* ─── Vehicle Card (grid view) ───────────────────────────────────────────── */
-const VehicleCard: React.FC<{ vehicle: Vehicle; onDelete: () => void }> = ({ vehicle, onDelete }) => {
+const VehicleCard: React.FC<{ vehicle: Vehicle; onDelete: () => void; canDelete: boolean }> = ({ vehicle, onDelete, canDelete }) => {
   const colorDot  = COLOR_DOTS[vehicle.color?.toLowerCase() || ''];
   const typeColor = TYPE_COLORS[vehicle.vehicle_type || 'other'] || '#94a3b8';
 
@@ -199,13 +214,15 @@ const VehicleCard: React.FC<{ vehicle: Vehicle; onDelete: () => void }> = ({ veh
           }}>
             {vehicle.plate_number}
           </div>
-          <button
-            className="btn btn-danger btn-icon"
-            style={{ width: 28, height: 28 }}
-            onClick={e => { e.preventDefault(); e.stopPropagation(); onDelete(); }}
-          >
-            <Trash2 size={11} />
-          </button>
+          {canDelete && (
+            <button
+              className="btn btn-danger btn-icon"
+              style={{ width: 28, height: 28 }}
+              onClick={e => { e.preventDefault(); e.stopPropagation(); onDelete(); }}
+            >
+              <Trash2 size={11} />
+            </button>
+          )}
         </div>
 
         {/* Name + type badge */}
@@ -282,12 +299,17 @@ const VehicleCard: React.FC<{ vehicle: Vehicle; onDelete: () => void }> = ({ veh
 export const Vehicles: React.FC = () => {
   const qc = useQueryClient();
   const navigate = useNavigate();
+  const { user } = useAuth();
+  const canManage = user?.role === 'admin' || user?.role === 'manager';
   const [searchParams] = useSearchParams();
   const incomingPlate = (searchParams.get('plate') || '').toUpperCase();
 
   const [search, setSearch]       = useState(incomingPlate);
   const [deleteId, setDeleteId]   = useState<number | null>(null);
   const [showForm, setShowForm]   = useState(false);
+  const [showMerge, setShowMerge] = useState(false);
+  const [fixPlateFor, setFixPlateFor] = useState<Vehicle | null>(null);
+  const [fixPlateValue, setFixPlateValue] = useState('');
   const [typeFilter, setTypeFilter] = useState('all');
   const [viewMode, setViewMode] = useState<'grid' | 'table'>('table');
   const [sortKey, setSortKey] = useState<SortKey>('last_visit');
@@ -305,6 +327,22 @@ export const Vehicles: React.FC = () => {
     queryFn: () => vehiclesApi.list().then(r => r.data),
     refetchInterval: 45000,
   });
+
+  const { data: inShop = [] } = useQuery({
+    queryKey: ['visits-in-shop'],
+    queryFn: () => visitsApi.inShop().then(r => r.data),
+    refetchInterval: 20000,
+  });
+
+  const activeVisitByPlate = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const row of inShop as { plate_number?: string; source?: string; visit_id?: number | null }[]) {
+      if (row.source === 'active_visit' && row.visit_id && row.plate_number) {
+        m.set(row.plate_number.toUpperCase(), row.visit_id);
+      }
+    }
+    return m;
+  }, [inShop]);
 
   const refreshFleet = () => {
     qc.invalidateQueries({ queryKey: ['vehicles'] });
@@ -336,7 +374,51 @@ export const Vehicles: React.FC = () => {
   const deleteMutation = useMutation({
     mutationFn: (id: number) => vehiclesApi.delete(id),
     onSuccess: () => { toast.success('Deleted'); setDeleteId(null); qc.invalidateQueries({ queryKey: ['vehicles'] }); },
-    onError: () => toast.error('Delete failed'),
+    onError: (e: any) => toast.error(e?.response?.status === 403 ? 'Only managers can delete vehicles' : 'Delete failed'),
+  });
+
+  // ── OCR correction: fix a misread plate (auto-merges into an existing record on conflict)
+  const fixPlateMutation = useMutation({
+    mutationFn: ({ id, plate, merge }: { id: number; plate: string; merge: boolean }) =>
+      vehiclesApi.correctPlate(id, plate, merge),
+    onSuccess: (res) => {
+      qc.invalidateQueries({ queryKey: ['vehicles'] });
+      qc.invalidateQueries({ queryKey: ['vehicle-duplicates'] });
+      if (res.data?.merged_into) {
+        toast.success(`Plate corrected — duplicate merged (${res.data.visits_moved} visits moved)`);
+      } else {
+        toast.success('Plate corrected');
+      }
+      setFixPlateFor(null);
+    },
+    onError: (e: any, vars) => {
+      const detail = e?.response?.data?.detail;
+      if (e?.response?.status === 409 && detail?.existing_vehicle_id) {
+        if (window.confirm(`${detail.message}\n\nMerge this vehicle (and all its visits) into the existing record?`)) {
+          fixPlateMutation.mutate({ ...vars, merge: true });
+        }
+      } else {
+        toast.error(typeof detail === 'string' ? detail : 'Plate correction failed');
+      }
+    },
+  });
+
+  // ── Duplicate detection + merge (manager/admin)
+  const { data: dupData, isLoading: dupsLoading, refetch: refetchDups } = useQuery({
+    queryKey: ['vehicle-duplicates'],
+    queryFn: () => vehiclesApi.duplicates().then(r => r.data),
+    enabled: canManage && showMerge,
+  });
+
+  const mergeMutation = useMutation({
+    mutationFn: ({ targetId, sourceId }: { targetId: number; sourceId: number }) =>
+      vehiclesApi.merge(targetId, sourceId),
+    onSuccess: (res) => {
+      toast.success(`Merged ${res.data?.merged_plate || 'duplicate'} (${res.data?.visits_moved ?? 0} visits moved)`);
+      qc.invalidateQueries({ queryKey: ['vehicles'] });
+      refetchDups();
+    },
+    onError: (e: any) => toast.error(e?.response?.data?.detail || 'Merge failed'),
   });
 
   const filtered = useMemo(() => {
@@ -446,6 +528,8 @@ export const Vehicles: React.FC = () => {
         @keyframes vehicles-shimmer { 0%{background-position:0% 50%}100%{background-position:200% 50%} }
       `}</style>
 
+      <OpsQuickNav primaryAction={{ to: '/visits/new', label: 'Work order' }} />
+
       {/* Hero */}
       <div style={{
         position: 'relative',
@@ -506,6 +590,11 @@ export const Vehicles: React.FC = () => {
               <Link to="/fleet-intelligence" className="btn btn-secondary" style={{ display: 'flex', alignItems: 'center', gap: 6, textDecoration: 'none' }}>
                 <BarChart2 size={14} /> Fleet intelligence
               </Link>
+              {canManage && (
+                <button type="button" className="btn btn-secondary" onClick={() => setShowMerge(true)} style={{ display: 'flex', alignItems: 'center', gap: 6 }} title="Find and merge duplicate vehicles created by OCR misreads">
+                  <GitMerge size={14} /> Merge duplicates
+                </button>
+              )}
               <button type="button" className="btn btn-primary" onClick={() => setShowForm(true)} style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
                 <Plus size={15} /> Add vehicle
               </button>
@@ -713,6 +802,7 @@ export const Vehicles: React.FC = () => {
                   key={vehicle.id}
                   vehicle={vehicle}
                   onDelete={() => setDeleteId(vehicle.id)}
+                  canDelete={canManage}
                 />
               ))}
             </div>
@@ -796,6 +886,15 @@ export const Vehicles: React.FC = () => {
                                 color: 'var(--text-accent)', background: 'rgba(59,130,246,0.08)',
                                 padding: '4px 10px', borderRadius: 8, letterSpacing: '0.06em',
                               }}>{v.plate_number}</span>
+                              {activeVisitByPlate.has(v.plate_number.toUpperCase()) && (
+                                <Link
+                                  to={`/visits/${activeVisitByPlate.get(v.plate_number.toUpperCase())}`}
+                                  className="ops-on-floor-badge"
+                                  onClick={e => e.stopPropagation()}
+                                >
+                                  On floor
+                                </Link>
+                              )}
                             </td>
                             <td style={{ ...tdStyle, fontWeight: 700, color: 'var(--text-primary)', minWidth: 160 }}>
                               <div>{v.make || 'Unknown'}{v.model ? ` ${v.model}` : ''}</div>
@@ -846,16 +945,26 @@ export const Vehicles: React.FC = () => {
                                 <Link to={`/visits/new?plate=${encodeURIComponent(v.plate_number)}`} className="btn btn-ghost btn-icon" title="New visit" onClick={e => e.stopPropagation()}>
                                   <Plus size={13} />
                                 </Link>
-                                <button type="button" className="btn btn-danger btn-icon" title="Delete" onClick={() => setDeleteId(v.id)}>
-                                  <Trash2 size={13} />
+                                <button type="button" className="btn btn-ghost btn-icon" title="Fix plate (OCR correction)" onClick={() => { setFixPlateFor(v); setFixPlateValue(v.plate_number); }}>
+                                  <PenLine size={13} />
                                 </button>
+                                {canManage && (
+                                  <button type="button" className="btn btn-danger btn-icon" title="Delete" onClick={() => setDeleteId(v.id)}>
+                                    <Trash2 size={13} />
+                                  </button>
+                                )}
                               </div>
                             </td>
                           </tr>
                           {isOpen && (
                             <tr>
                               <td colSpan={9} style={{ padding: 0, borderBottom: '1px solid var(--border-light)' }}>
-                                <VehicleExpandPanel vehicle={v} onDelete={() => setDeleteId(v.id)} />
+                                <VehicleExpandPanel
+                                  vehicle={v}
+                                  onDelete={() => setDeleteId(v.id)}
+                                  onFixPlate={() => { setFixPlateFor(v); setFixPlateValue(v.plate_number); }}
+                                  canDelete={canManage}
+                                />
                               </td>
                             </tr>
                           )}
@@ -927,6 +1036,149 @@ export const Vehicles: React.FC = () => {
               >
                 {createMutation.isPending ? <><div className="spinner" style={{ width: 14, height: 14 }} /> Saving…</> : <><Plus size={13} /> Add Vehicle</>}
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Fix plate modal — staff OCR correction */}
+      {fixPlateFor && (
+        <div className="modal-backdrop" onClick={() => setFixPlateFor(null)}>
+          <div className="modal-box" style={{ maxWidth: 440 }} onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2 style={{ fontSize: 16, fontWeight: 700, display: 'flex', alignItems: 'center', gap: 8 }}>
+                <PenLine size={16} color="var(--text-accent)" /> Correct plate
+              </h2>
+              <button className="btn btn-ghost btn-icon" onClick={() => setFixPlateFor(null)}><X size={16} /></button>
+            </div>
+            <div className="modal-body">
+              <p style={{ fontSize: 13, color: 'var(--text-secondary)', marginTop: 0, lineHeight: 1.6 }}>
+                Fix a camera misread. Visits and ANPR history stay attached. If the corrected
+                plate already exists, you'll be offered to merge the two records.
+              </p>
+              <label className="label">Current plate</label>
+              <div style={{
+                fontFamily: 'monospace', fontWeight: 800, fontSize: 16, letterSpacing: 2,
+                color: 'var(--text-muted)', padding: '8px 14px', background: 'var(--bg-elevated)',
+                border: '1px solid var(--border-light)', borderRadius: 10, marginBottom: 14,
+              }}>{fixPlateFor.plate_number}</div>
+              <label className="label">Corrected plate</label>
+              <input
+                style={{ ...inputStyle, fontFamily: 'monospace', fontWeight: 800, letterSpacing: 2, fontSize: 16 }}
+                value={fixPlateValue}
+                autoFocus
+                onChange={e => setFixPlateValue(e.target.value.toUpperCase())}
+                onKeyDown={e => {
+                  if (e.key === 'Enter' && fixPlateValue.trim().length >= 2 && fixPlateValue.trim() !== fixPlateFor.plate_number) {
+                    fixPlateMutation.mutate({ id: fixPlateFor.id, plate: fixPlateValue.trim(), merge: false });
+                  }
+                }}
+              />
+            </div>
+            <div className="modal-footer">
+              <button className="btn btn-secondary" onClick={() => setFixPlateFor(null)}>Cancel</button>
+              <button
+                className="btn btn-primary"
+                disabled={
+                  fixPlateMutation.isPending
+                  || fixPlateValue.trim().length < 2
+                  || fixPlateValue.trim() === fixPlateFor.plate_number
+                }
+                onClick={() => fixPlateMutation.mutate({ id: fixPlateFor.id, plate: fixPlateValue.trim(), merge: false })}
+              >
+                {fixPlateMutation.isPending
+                  ? <><div className="spinner" style={{ width: 14, height: 14 }} /> Saving…</>
+                  : <><PenLine size={13} /> Save correction</>}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Merge duplicates modal — manager/admin */}
+      {showMerge && (
+        <div className="modal-backdrop" onClick={() => setShowMerge(false)}>
+          <div className="modal-box" style={{ maxWidth: 640, maxHeight: '82vh', display: 'flex', flexDirection: 'column' }} onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2 style={{ fontSize: 16, fontWeight: 700, display: 'flex', alignItems: 'center', gap: 8 }}>
+                <GitMerge size={16} color="#34d399" /> Merge duplicate vehicles
+              </h2>
+              <button className="btn btn-ghost btn-icon" onClick={() => setShowMerge(false)}><X size={16} /></button>
+            </div>
+            <div className="modal-body" style={{ overflowY: 'auto' }}>
+              <p style={{ fontSize: 13, color: 'var(--text-secondary)', marginTop: 0, lineHeight: 1.6 }}>
+                These records have nearly identical plates — usually one car read slightly
+                differently by the camera. Merging moves all visits and detections onto the
+                record you keep and deletes the duplicate.
+              </p>
+              {dupsLoading ? (
+                <div style={{ display: 'flex', justifyContent: 'center', padding: 36 }}>
+                  <div className="spinner" style={{ width: 26, height: 26 }} />
+                </div>
+              ) : !dupData?.groups?.length ? (
+                <div className="empty-state" style={{ padding: '28px 16px' }}>
+                  <GitMerge size={32} />
+                  <h3 style={{ fontSize: 15 }}>No duplicates found</h3>
+                  <p style={{ fontSize: 12.5 }}>Your fleet registry is clean — every plate is unique.</p>
+                </div>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+                  {dupData.groups.map((group: any, gi: number) => {
+                    const target = group.vehicles.find((v: any) => v.id === group.suggested_target_id) || group.vehicles[0];
+                    return (
+                      <div key={gi} className="card" style={{ padding: 14, border: '1px solid var(--border-light)' }}>
+                        <div style={{ fontSize: 11, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.07em', color: 'var(--text-muted)', marginBottom: 10 }}>
+                          Group {gi + 1} · keeping <span style={{ color: '#34d399', fontFamily: 'monospace' }}>{target.plate_number}</span>
+                        </div>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                          {group.vehicles.map((v: any) => {
+                            const isTarget = v.id === target.id;
+                            return (
+                              <div key={v.id} style={{
+                                display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10,
+                                padding: '8px 12px', borderRadius: 10,
+                                background: isTarget ? 'rgba(16,185,129,0.07)' : 'var(--bg-elevated)',
+                                border: `1px solid ${isTarget ? 'rgba(52,211,153,0.35)' : 'var(--border-light)'}`,
+                              }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+                                  <span style={{ fontFamily: 'monospace', fontWeight: 800, fontSize: 13.5, color: isTarget ? '#34d399' : 'var(--text-accent)', letterSpacing: 1 }}>
+                                    {v.plate_number}
+                                  </span>
+                                  <span style={{ fontSize: 11.5, color: 'var(--text-muted)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                    {[v.make, v.model].filter(Boolean).join(' ') || '—'} · {v.total_visits} visit{v.total_visits !== 1 ? 's' : ''}
+                                    {v.owner_name ? ` · ${v.owner_name}` : ''}
+                                  </span>
+                                </div>
+                                {isTarget ? (
+                                  <span style={{ fontSize: 10, fontWeight: 800, color: '#34d399', textTransform: 'uppercase', letterSpacing: '0.06em', whiteSpace: 'nowrap' }}>
+                                    Keep
+                                  </span>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    className="btn btn-secondary btn-sm"
+                                    disabled={mergeMutation.isPending}
+                                    style={{ whiteSpace: 'nowrap', display: 'inline-flex', alignItems: 'center', gap: 5 }}
+                                    onClick={() => mergeMutation.mutate({ targetId: target.id, sourceId: v.id })}
+                                  >
+                                    <GitMerge size={12} /> Merge into {target.plate_number}
+                                  </button>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+            <div className="modal-footer">
+              <button className="btn btn-secondary" onClick={() => refetchDups()} disabled={dupsLoading}>
+                <RefreshCw size={13} /> Re-scan
+              </button>
+              <button className="btn btn-primary" onClick={() => setShowMerge(false)}>Done</button>
             </div>
           </div>
         </div>

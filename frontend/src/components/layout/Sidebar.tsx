@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../../contexts/AuthContext';
 import { useTheme } from '../../contexts/ThemeContext';
+import { useOpsCounts } from '../../hooks/useOpsCounts';
 import { NAV_MAIN, NAV_ADMIN, filterNavItems } from '../../lib/permissions';
 
 const ICONS: Record<string, typeof Users> = {
@@ -34,6 +35,12 @@ export const Sidebar: React.FC<SidebarProps> = ({ open = false, onClose }) => {
   const { toggle, isDark } = useTheme();
   const mainNav = filterNavItems(NAV_MAIN, user);
   const adminNav = filterNavItems(NAV_ADMIN, user);
+  const { inShopCount, anprPending } = useOpsCounts();
+  const navBadge = (pageKey: string): number | null => {
+    if (pageKey === 'visits' && inShopCount > 0) return inShopCount;
+    if (pageKey === 'visionflow' && anprPending > 0) return anprPending;
+    return null;
+  };
   const touchStartX = useRef<number | null>(null);
 
   const handleNavClick = useCallback(() => {
@@ -60,6 +67,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ open = false, onClose }) => {
 
   const renderNavLink = (item: typeof NAV_MAIN[number]) => {
     const Icon = ICONS[item.pageKey] ?? ClipboardList;
+    const badge = navBadge(item.pageKey);
     return (
       <NavLink
         key={item.to}
@@ -72,6 +80,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ open = false, onClose }) => {
           <Icon size={18} strokeWidth={2} />
         </span>
         <span className="nav-item-label">{item.label}</span>
+        {badge != null && <span className="nav-item-badge">{badge > 99 ? '99+' : badge}</span>}
         <ChevronRight size={16} className="nav-item-chevron" aria-hidden="true" />
       </NavLink>
     );

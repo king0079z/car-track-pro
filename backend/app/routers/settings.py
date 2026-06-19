@@ -220,12 +220,17 @@ def _save(data: dict[str, Any]) -> None:
 @router.get("/public")
 def get_public_settings():
     """Unauthenticated branding, notices, and coarse feature flags for all clients."""
+    from ..services.whatsapp_notify import is_configured, status_summary
+
     s = _load()
+    wa = status_summary()
     return {
         "business_name": s.get("business_name") or DEFAULT_SETTINGS["business_name"],
         "maintenance_message": (s.get("maintenance_message") or "").strip(),
         "client_error_auto_capture": bool(s.get("client_error_auto_capture", True)),
         "timezone": (s.get("timezone") or DEFAULT_SETTINGS["timezone"] or "Asia/Qatar").strip(),
+        "whatsapp_ready": bool(wa.get("configured") and wa.get("runtime_toggle")),
+        "whatsapp_dry_run": bool(wa.get("dry_run")),
     }
 
 

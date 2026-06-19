@@ -14,6 +14,7 @@ import {
   Wifi,
 } from 'lucide-react';
 import toast from 'react-hot-toast';
+import { DahuaQrScanner } from '../../components/DahuaQrScanner';
 import { camerasApi, type DahuaHeroA1Config, type DahuaHeroA1Public, type DahuaQrParseResult } from '../../services/api';
 
 type Props = {
@@ -54,6 +55,7 @@ export const DahuaHeroA1Panel: React.FC<Props> = ({ compact = false, onUseAsSour
   const [scanMeta, setScanMeta] = useState<{ subnets?: string; checked?: number } | null>(null);
   const [qrText, setQrText] = useState('');
   const [qrBusy, setQrBusy] = useState(false);
+  const [qrScannerOpen, setQrScannerOpen] = useState(false);
   const [qrGuide, setQrGuide] = useState<DahuaQrParseResult | null>(null);
   const [p2pBusy, setP2pBusy] = useState(false);
   const [p2pStatus, setP2pStatus] = useState<Record<string, unknown> | null>(null);
@@ -122,7 +124,7 @@ export const DahuaHeroA1Panel: React.FC<Props> = ({ compact = false, onUseAsSour
   }, []);
 
   useEffect(() => {
-    if (loading || (form.connection_mode !== 'p2p' && form.connection_mode !== 'auto')) return;
+    if (loading || (form.connection_mode !== 'p2p' && form.connection_mode !== 'auto' && form.connection_mode !== 'cartrack_cloud')) return;
     void refreshP2pStatus();
     if (form.device_serial?.trim()) void refreshCloudProbe();
     const id = window.setInterval(() => {
@@ -169,19 +171,26 @@ export const DahuaHeroA1Panel: React.FC<Props> = ({ compact = false, onUseAsSour
     }
     setP2pBusy(true);
     try {
+      const mode = form.connection_mode === 'auto' ? 'auto' : form.connection_mode === 'cartrack_cloud' ? 'cartrack_cloud' : 'p2p';
       await camerasApi.updateHeroA1({
-        connection_mode: form.connection_mode === 'auto' ? 'auto' : 'p2p',
+        connection_mode: mode,
         device_serial: form.device_serial,
         host: form.host,
         username: form.username,
         ...(useSavedPassword ? {} : { password: pwd }),
         enabled: form.enabled,
       });
-      const res = await camerasApi.p2pStart(
+      const startApi = mode === 'cartrack_cloud' ? camerasApi.cloudTunnelStart : camerasApi.p2pStart;
+      const res = await startApi(
         useSavedPassword ? { username: form.username } : { username: form.username, password: pwd },
       );
-      setP2pStatus(res.data.status as Record<string, unknown>);
-      toast('Cloud tunnel starting — UDP setup can take up to 3 minutes…', { duration: 5000, icon: '⏳' });
+      setP2pStatus((res.data.status ?? res.data.tunnel) as Record<string, unknown>);
+      toast(
+        mode === 'cartrack_cloud'
+          ? 'CarTrack Cloud connecting — video may take up to 60 seconds…'
+          : 'Cloud tunnel starting — UDP setup can take up to 3 minutes…',
+        { duration: 5000, icon: '⏳' },
+      );
       const ready = await pollCloudTunnel();
       await refreshP2pStatus();
       if (ready) {
@@ -227,7 +236,7 @@ export const DahuaHeroA1Panel: React.FC<Props> = ({ compact = false, onUseAsSour
       setPasswordSaved(pwdOk);
       setForm(f => ({ ...f, password: '' }));
       toast.success('Camera settings saved');
-      if ((form.connection_mode === 'p2p' || form.connection_mode === 'auto') && form.device_serial && pwdOk) {
+      if ((form.connection_mode === 'p2p' || form.connection_mode === 'auto' || form.connection_mode === 'cartrack_cloud') && form.device_serial && pwdOk) {
         toast('Cloud tunnel starting — wait up to 3 minutes for UDP setup.', { duration: 5000, icon: '⏳' });
         void startCloud();
       }
@@ -262,12 +271,13 @@ export const DahuaHeroA1Panel: React.FC<Props> = ({ compact = false, onUseAsSour
     }
   };
 
-  const applyQr = async () => {
-    const qr = qrText.trim();
+  const applyQr = async (raw?: string) => {
+    const qr = (raw ?? qrText).trim();
     if (!qr) {
       toast.error('Paste the text from your camera QR label');
       return;
     }
+    if (raw) setQrText(raw);
     setQrBusy(true);
     try {
       const res = await camerasApi.parseHeroQr(qr, true);
@@ -420,10 +430,19 @@ export const DahuaHeroA1Panel: React.FC<Props> = ({ compact = false, onUseAsSour
           <input
             type="radio"
             name="dahua-conn"
+            checked={form.connection_mode === 'cartrack_cloud'}
+            onChange={() => setForm(f => ({ ...f, connection_mode: 'cartrack_cloud' }))}
+          />
+          CarTrack Cloud (remote, no shop PC) — recommended
+        </label>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+          <input
+            type="radio"
+            name="dahua-conn"
             checked={form.connection_mode === 'auto'}
             onChange={() => setForm(f => ({ ...f, connection_mode: 'auto' }))}
           />
-          Auto (cloud, then LAN) — recommended
+          Auto (legacy cloud, then LAN)
         </label>
         <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
           <input
@@ -432,7 +451,7 @@ export const DahuaHeroA1Panel: React.FC<Props> = ({ compact = false, onUseAsSour
             checked={form.connection_mode === 'cartrack_relay'}
             onChange={() => setForm(f => ({ ...f, connection_mode: 'cartrack_relay' }))}
           />
-          CarTrack Cloud Relay
+          Site relay (shop PC → your VPS)
         </label>
         <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
           <input
@@ -523,17 +542,25 @@ export const DahuaHeroA1Panel: React.FC<Props> = ({ compact = false, onUseAsSour
         </div>
       )}
 
-      {(form.connection_mode === 'p2p' || form.connection_mode === 'auto') && (
+      {(form.connection_mode === 'cartrack_cloud' || form.connection_mode === 'p2p' || form.connection_mode === 'auto') && (
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+          {form.connection_mode === 'cartrack_cloud' && (
+            <p style={{ margin: 0, fontSize: 11, color: 'var(--text-secondary)', width: '100%', lineHeight: 1.55 }}>
+              <strong>CarTrack Cloud</strong> connects your VPS to the camera remotely — no Imou app and no PC at the shop.
+              Enter serial + device password, save, then connect. Close live view in Imou/DMSS on phones (one stream at a time).
+            </p>
+          )}
           <button type="button" className="btn btn-secondary" disabled={p2pBusy || !form.device_serial} onClick={() => void startCloud()} style={{ fontSize: 13 }}>
             {p2pBusy ? <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> : null}
-            Start cloud tunnel
+            {form.connection_mode === 'cartrack_cloud' ? 'Connect CarTrack Cloud' : 'Start cloud tunnel'}
           </button>
           <button type="button" className="btn btn-secondary" disabled={p2pBusy} onClick={() => void stopCloud()} style={{ fontSize: 13 }}>
             Stop tunnel
           </button>
           {p2pStatus?.running ? (
-            <span style={{ fontSize: 11, color: '#10b981' }}>Cloud tunnel ready on port {String(p2pStatus.local_port ?? 18554)}</span>
+            <span style={{ fontSize: 11, color: '#10b981' }}>
+              {form.connection_mode === 'cartrack_cloud' ? 'CarTrack Cloud connected' : 'Cloud tunnel ready'} on port {String(p2pStatus.local_port ?? 18554)}
+            </span>
           ) : p2pBusy || (p2pStatus?.phase && p2pStatus.phase !== 'idle' && p2pStatus.phase !== 'failed') ? (
             <span style={{ fontSize: 11, color: '#f59e0b' }}>
               {String(p2pStatus?.phase_message || 'Cloud tunnel connecting…')}
@@ -609,16 +636,26 @@ export const DahuaHeroA1Panel: React.FC<Props> = ({ compact = false, onUseAsSour
           placeholder="{SN:BF0E4C7GAGB833C,DT:DH-H3A,SC:L219E7D3}"
           spellCheck={false}
         />
-        <button
-          type="button"
-          className="btn btn-secondary"
-          disabled={qrBusy || !qrText.trim()}
-          onClick={() => void applyQr()}
-          style={{ fontSize: 13, alignSelf: 'flex-start', display: 'inline-flex', alignItems: 'center', gap: 6 }}
-        >
-          {qrBusy ? <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> : <QrCode size={14} />}
-          Apply QR to setup
-        </button>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={() => setQrScannerOpen(true)}
+            style={{ fontSize: 13, display: 'inline-flex', alignItems: 'center', gap: 6 }}
+          >
+            <QrCode size={14} /> Scan QR label
+          </button>
+          <button
+            type="button"
+            className="btn btn-secondary"
+            disabled={qrBusy || !qrText.trim()}
+            onClick={() => void applyQr()}
+            style={{ fontSize: 13, display: 'inline-flex', alignItems: 'center', gap: 6 }}
+          >
+            {qrBusy ? <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> : <QrCode size={14} />}
+            Apply QR to setup
+          </button>
+        </div>
         {form.device_serial && (
           <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
             Serial {form.device_serial}
@@ -763,6 +800,12 @@ export const DahuaHeroA1Panel: React.FC<Props> = ({ compact = false, onUseAsSour
           </div>
         </div>
       )}
+
+      <DahuaQrScanner
+        open={qrScannerOpen}
+        onClose={() => setQrScannerOpen(false)}
+        onScan={raw => void applyQr(raw)}
+      />
     </div>
   );
 };

@@ -19,7 +19,7 @@ def test_segment_dedupe_allows_multiple_exits_same_plate():
 def test_api_visit_resume_camera_dwell_after_two_segments(client, admin_token):
     """Two exited camera segments on an unsigned work order accumulate in-frame seconds."""
     headers = {"Authorization": f"Bearer {admin_token}"}
-    plate = "QA-RESUME-1"
+    plate = "8174 HGL"
     v = client.post(
         "/api/vehicles",
         json={"plate_number": plate, "plate_country": "QA", "vehicle_type": "sedan"},
@@ -86,7 +86,7 @@ def test_api_visit_resume_camera_dwell_after_two_segments(client, admin_token):
     )
     assert signed.status_code == 200
     assert signed.json().get("signature_captured_at") is not None
-    frozen_secs = signed.json()["anpr_camera_seconds"]
+    after_sign_secs = signed.json()["anpr_camera_seconds"]
 
     _auto_sync_to_cartrack(job_id, "cam-0", [
         {
@@ -96,11 +96,32 @@ def test_api_visit_resume_camera_dwell_after_two_segments(client, admin_token):
             "t_enter_sec": 500.0,
             "t_exit_sec": 599.0,
             "status": "exited",
+            "presence_duration_sec": 151.0,
         },
     ])
 
     after = client.get(f"/api/visits/{visit_id}", headers=headers)
-    assert after.json()["anpr_camera_seconds"] == pytest.approx(frozen_secs)
+    assert after.json()["anpr_camera_seconds"] == pytest.approx(151.0)
+
+    checkout = client.post(f"/api/visits/{visit_id}/checkout", headers=headers)
+    assert checkout.status_code == 200
+    frozen = client.get(f"/api/visits/{visit_id}", headers=headers)
+    frozen_secs = frozen.json()["anpr_camera_seconds"]
+
+    _auto_sync_to_cartrack(job_id, "cam-0", [
+        {
+            "plate": plate,
+            "track_id": 40,
+            "duration_sec": 99.0,
+            "t_enter_sec": 600.0,
+            "t_exit_sec": 699.0,
+            "status": "exited",
+            "presence_duration_sec": 250.0,
+        },
+    ])
+
+    after_checkout = client.get(f"/api/visits/{visit_id}", headers=headers)
+    assert after_checkout.json()["anpr_camera_seconds"] == pytest.approx(frozen_secs)
 
 
 def test_api_no_visit_link_after_resume_gap_expired(client, admin_token, monkeypatch):

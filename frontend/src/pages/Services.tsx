@@ -1,11 +1,13 @@
 import React, { useState, useMemo } from 'react';
+import { Link } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   Plus, Wrench, X, Edit, Trash2, Clock, DollarSign,
   Search, BarChart2, Tag, AlertTriangle, CheckCircle,
-  ChevronDown, ArrowUpDown, ArrowUp, ArrowDown, Layers, Sparkles,
+  ChevronDown, ArrowUpDown, ArrowUp, ArrowDown, Layers, Sparkles, Brain,
 } from 'lucide-react';
 import { servicesApi } from '../services/api';
+import { OpsQuickNav } from '../components/ops/OpsQuickNav';
 import toast from 'react-hot-toast';
 import { fmtQatar } from '../lib/qatarTime';
 import type { Service, ServiceCategory } from '../types';
@@ -244,11 +246,17 @@ export const Services: React.FC = () => {
 
   return (
     <div className="animate-fade-in">
+      <OpsQuickNav />
       {/* Header */}
       <div className="page-header">
         <div>
           <h1 className="page-title">Services</h1>
-          <p className="page-desc">Service catalog — pricing, duration estimates, and categories</p>
+          <p className="page-desc">
+            Service catalog — pricing and duration estimates.{' '}
+            <Link to="/fleet-intelligence" style={{ color: 'var(--text-accent)', fontWeight: 700 }}>
+              <Brain size={12} style={{ verticalAlign: -2 }} /> Compare actual vs estimated times
+            </Link>
+          </p>
         </div>
         <button
           className="btn btn-primary"

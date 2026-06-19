@@ -144,6 +144,7 @@ def test_ocr_stride_confident_throttles():
     est = SpeedEstimator.__new__(SpeedEstimator)
     est._ocr_interval = 2
     est._min_ocr_conf = 0.28
+    est._ocr_locked = {5: True}
     est._plate_votes = {5: [("3574 BNW", 0.72), ("3574 BNW", 0.68)]}
     est._best_plate_for_track = lambda tid: "3574 BNW"  # type: ignore[method-assign]
     assert est._ocr_stride_for_track(5) >= 3

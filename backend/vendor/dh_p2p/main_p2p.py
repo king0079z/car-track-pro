@@ -180,7 +180,7 @@ def _bind_realm(conn, socketclient, realm_id: int, session_lock) -> bool:
                 + b"\x00\x00\x02\x2A"
                 + b"\x7f\x00\x00\x01",
             )
-        bind_deadline = time.monotonic() + 15.0
+        bind_deadline = time.monotonic() + 30.0
         while time.monotonic() < bind_deadline:
             rdy, _, _ = select.select([conn], [], [], 0.5)
             if not rdy:

@@ -91,6 +91,8 @@ def _sqlite_add_missing_visit_columns():
             conn.execute(text("ALTER TABLE visits ADD COLUMN supervisor_signature TEXT"))
         if "supervisor_signed_by" not in col_names:
             conn.execute(text("ALTER TABLE visits ADD COLUMN supervisor_signed_by INTEGER"))
+        if "whatsapp_notified_at" not in col_names:
+            conn.execute(text("ALTER TABLE visits ADD COLUMN whatsapp_notified_at DATETIME"))
 
 
 def _sqlite_add_missing_anpr_columns():

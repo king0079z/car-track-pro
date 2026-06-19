@@ -11,9 +11,13 @@ from ..models.user import User
 from ..models.vehicle import Vehicle
 from ..models.visit import Visit, VisitStatus
 from ..schemas.analytics import DashboardStats
-from ..utils.auth import get_current_user, require_page
+from ..utils.auth import get_current_user, require_any_page, require_page
 from ..utils.helpers import calculate_duration
-from ..services.service_duration import infer_service_item_minutes, visit_service_counts as get_visit_service_counts
+from ..services.service_duration import (
+    infer_service_item_minutes,
+    visit_service_counts as get_visit_service_counts,
+    visit_shop_duration_minutes,
+)
 from ..utils.qatar_time import (
     date_key_qatar,
     hour_key_qatar,
@@ -46,10 +50,9 @@ def get_dashboard_stats(db: Session = Depends(get_db), current_user: User = Depe
         Visit.status == VisitStatus.COMPLETED
     ).count()
 
-    # Per-visit dwell: prefer stored duration_minutes; else derive from exit − entry
-    # (completed visits only — matches "service time" / shop dwell, not ANPR track seconds).
-    dwell_rows = (
-        db.query(Visit.duration_minutes, Visit.entry_time, Visit.exit_time)
+    # Per-visit dwell: shop presence (camera + entry→checkout) for completed visits today.
+    completed_today_rows = (
+        db.query(Visit)
         .filter(
             Visit.entry_time >= today_start,
             Visit.entry_time <= today_end,
@@ -58,11 +61,10 @@ def get_dashboard_stats(db: Session = Depends(get_db), current_user: User = Depe
         .all()
     )
     dwell_vals: list[float] = []
-    for dm, et, xt in dwell_rows:
-        if dm is not None:
-            dwell_vals.append(float(dm))
-        elif xt is not None and et is not None:
-            dwell_vals.append(calculate_duration(et, xt))
+    for v in completed_today_rows:
+        mins = visit_shop_duration_minutes(v)
+        if mins is not None and mins > 0:
+            dwell_vals.append(float(mins))
     avg_duration = sum(dwell_vals) / len(dwell_vals) if dwell_vals else 0.0
 
     total_revenue = db.query(func.sum(Visit.total_price)).filter(
@@ -119,6 +121,131 @@ def get_dashboard_stats(db: Session = Depends(get_db), current_user: User = Depe
         anpr_pending_visits=anpr_pending,
         anpr_avg_speed_today=round(float(anpr_avg_speed), 1) if anpr_avg_speed else None,
     )
+
+
+@router.get("/today-ops")
+def get_today_ops(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_any_page("dashboard", "analytics")),
+):
+    """Today's revenue, average service time, and per-service breakdown for the dashboard."""
+    from sqlalchemy.orm import joinedload as jl
+
+    today_start, today_end = qatar_day_start_end(qatar_today())
+
+    completed_visits = (
+        db.query(Visit)
+        .options(jl(Visit.vehicle))
+        .filter(
+            Visit.entry_time >= today_start,
+            Visit.entry_time <= today_end,
+            Visit.status == VisitStatus.COMPLETED,
+        )
+        .order_by(Visit.exit_time.desc().nullslast(), Visit.entry_time.desc())
+        .all()
+    )
+
+    total_revenue = sum(float(v.total_price or 0) for v in completed_visits)
+
+    dwell_vals: list[float] = []
+    for v in completed_visits:
+        mins = visit_shop_duration_minutes(v)
+        if mins is not None and mins > 0:
+            dwell_vals.append(float(mins))
+    avg_duration = round(sum(dwell_vals) / len(dwell_vals), 1) if dwell_vals else 0.0
+
+    pipeline_revenue = (
+        db.query(func.sum(Visit.total_price))
+        .filter(
+            Visit.entry_time >= today_start,
+            Visit.entry_time <= today_end,
+            Visit.status.in_([VisitStatus.WAITING, VisitStatus.IN_SERVICE, VisitStatus.ON_HOLD]),
+        )
+        .scalar()
+    ) or 0.0
+
+    items = (
+        db.query(ServiceItem, Service, Visit)
+        .join(Service, ServiceItem.service_id == Service.id)
+        .join(Visit, ServiceItem.visit_id == Visit.id)
+        .options(
+            jl(ServiceItem.visit).joinedload(Visit.service_items).joinedload(ServiceItem.service)
+        )
+        .filter(
+            Visit.entry_time >= today_start,
+            Visit.entry_time <= today_end,
+            Visit.status == VisitStatus.COMPLETED,
+        )
+        .all()
+    )
+
+    counts = get_visit_service_counts(db)
+    agg: dict[str, dict] = {}
+    for item, svc, visit in items:
+        key = svc.name
+        if key not in agg:
+            agg[key] = {
+                "service_name": svc.name,
+                "count": 0,
+                "total_revenue": 0.0,
+                "durations": [],
+                "estimated_minutes": svc.estimated_duration_minutes or 30,
+            }
+        agg[key]["count"] += 1
+        agg[key]["total_revenue"] += float(item.price or svc.base_price or 0)
+        minutes, _ = infer_service_item_minutes(item, svc, visit, counts)
+        if minutes is not None and minutes > 0:
+            agg[key]["durations"].append(float(minutes))
+
+    services: list[dict] = []
+    for v in agg.values():
+        if v["durations"]:
+            avg_m = round(sum(v["durations"]) / len(v["durations"]), 1)
+        else:
+            avg_m = float(v["estimated_minutes"])
+        est = float(v["estimated_minutes"])
+        services.append({
+            "service_name": v["service_name"],
+            "count": v["count"],
+            "total_revenue": round(v["total_revenue"], 2),
+            "avg_minutes": avg_m,
+            "estimated_minutes": est,
+            "vs_estimate_pct": round(avg_m / est * 100, 0) if est > 0 else 100,
+        })
+
+    services.sort(key=lambda x: (-x["total_revenue"], -x["count"]))
+
+    completed_jobs: list[dict] = []
+    for v in completed_visits:
+        veh = v.vehicle
+        mins = visit_shop_duration_minutes(v)
+        if mins is None and v.duration_minutes:
+            mins = float(v.duration_minutes)
+        completed_jobs.append({
+            "visit_id": v.id,
+            "visit_number": v.visit_number,
+            "vehicle_id": v.vehicle_id,
+            "plate_number": veh.plate_number if veh else "",
+            "vehicle_type": (veh.vehicle_type or "sedan") if veh else "unknown",
+            "make": veh.make if veh else None,
+            "model": veh.model if veh else None,
+            "year": veh.year if veh else None,
+            "duration_minutes": round(float(mins), 1) if mins else None,
+            "amount_paid": round(float(v.total_price or 0), 2),
+            "total_visits": int(veh.total_visits or 0) if veh else 1,
+            "owner_name": v.customer_name or (veh.owner_name if veh else None),
+            "exit_time": v.exit_time.isoformat() if v.exit_time else None,
+        })
+
+    return {
+        "total_revenue_today": round(total_revenue, 2),
+        "pipeline_revenue": round(float(pipeline_revenue), 2),
+        "avg_service_minutes": avg_duration,
+        "completed_today": len(completed_visits),
+        "service_lines_today": sum(s["count"] for s in services),
+        "services": services[:12],
+        "completed_jobs": completed_jobs,
+    }
 
 
 @router.get("/report")

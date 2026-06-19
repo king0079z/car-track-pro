@@ -1,18 +1,13 @@
-# Multi-arch base: python:3.11-slim ships both linux/amd64 and linux/arm64,
-# so the same Dockerfile builds on a normal cloud VM and on Oracle Cloud's free
-# Ampere A1 (ARM64) — no changes needed per architecture.
+# syntax=docker/dockerfile:1
+# Multi-arch: python:3.11-slim builds on amd64 and Oracle Ampere arm64.
 FROM python:3.11-slim
 
 WORKDIR /app
 
 ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    PIP_NO_CACHE_DIR=1
+    PYTHONDONTWRITEBYTECODE=1
 
-# System deps for OpenCV (headless) + video decode (RTSP/MP4) + OpenMP runtime
-# used by Torch/ONNX. Package names are valid on Debian 12 "bookworm" (the slim
-# base) AND available on both amd64 and arm64. build-essential lets pure-source
-# wheels (e.g. lap for BoT-SORT) compile if no prebuilt arm64 wheel exists.
+# System deps for OpenCV headless + FFmpeg + OpenMP (Torch/ONNX).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libglib2.0-0 \
         libgl1 \
@@ -22,13 +17,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
-# Containers run headless (no display), so swap the desktop OpenCV build for the
-# headless one: smaller, needs no X11/GL libraries, identical cv2 API. Keeps the
-# local (Windows/USB-webcam) requirements untouched.
-RUN sed -i 's/^opencv-python>=/opencv-python-headless>=/' requirements.txt \
+# Layer 1 (heavy, cached until requirements.txt changes):
+# - CPU-only PyTorch (~200 MB) — VPS has no GPU; easyocr otherwise pulls ~2 GB CUDA wheels.
+# - BuildKit pip cache survives rebuilds when only app/ code changes.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    sed -i 's/^opencv-python>=/opencv-python-headless>=/' requirements.txt \
     && pip install --upgrade pip \
+    && pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu \
     && pip install -r requirements.txt
 
+# Layer 2 (fast): only this layer rebuilds for routine Python fixes under app/.
 COPY . .
 
 RUN mkdir -p uploads ai/models outputs

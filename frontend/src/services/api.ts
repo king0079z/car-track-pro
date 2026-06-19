@@ -18,10 +18,13 @@ api.interceptors.request.use((config) => {
 api.interceptors.response.use(
   (res) => res,
   (err) => {
-    if (err.response?.status === 401) {
+    const status = err.response?.status;
+    if (status === 401) {
       localStorage.removeItem('cartrack_token');
       localStorage.removeItem('cartrack_user');
-      window.location.href = '/login';
+      if (!window.location.pathname.startsWith('/login')) {
+        window.location.href = '/login';
+      }
     }
     return Promise.reject(err);
   },
@@ -63,6 +66,7 @@ export const visitsApi = {
   create: (data: any) => api.post('/api/visits', data),
   update: (id: number, data: any) => api.patch(`/api/visits/${id}`, data),
   checkout: (id: number) => api.post(`/api/visits/${id}/checkout`),
+  resendWhatsapp: (id: number) => api.post(`/api/visits/${id}/whatsapp/resend`),
   captureSignature: (id: number, signature: string) =>
     api.post(`/api/visits/${id}/signature`, { signature }),
   addServiceItem: (visitId: number, data: { service_id: number; price?: number; assigned_staff_id?: number; notes?: string }) =>
@@ -84,6 +88,7 @@ export const servicesApi = {
 // ── Analytics ─────────────────────────────────────────────────────────
 export const analyticsApi = {
   dashboard: () => api.get('/api/analytics/dashboard'),
+  todayOps: () => api.get('/api/analytics/today-ops'),
   report: (params?: { start_date?: string; end_date?: string }) =>
     api.get('/api/analytics/report', { params }),
   hourly: (date?: string) =>
@@ -123,6 +128,10 @@ export const anprApi = {
 
   /** Recent ANPR detections with linked vehicle / visit info. */
   recent: (limit = 30) => api.get('/api/anpr/recent', { params: { limit } }),
+
+  /** Plates grouped with shop duration totals and segment history (dashboard). */
+  summary: (limitPlates = 50, lookbackDays = 7) =>
+    api.get('/api/anpr/summary', { params: { limit_plates: limitPlates, lookback_days: lookbackDays } }),
 
   /** All detections + vehicle info for a specific plate. */
   plate: (plate: string) => api.get(`/api/anpr/plate/${encodeURIComponent(plate)}`),
@@ -246,6 +255,8 @@ export const settingsApi = {
       maintenance_message: string;
       client_error_auto_capture: boolean;
       timezone: string;
+      whatsapp_ready?: boolean;
+      whatsapp_dry_run?: boolean;
     }>('/api/settings/public'),
   backupNow: () => api.post<{ ok: boolean; path?: string; files?: number; bytes?: number }>('/api/settings/backup-now'),
   backups: () =>
@@ -319,7 +330,7 @@ export type DahuaHeroA1Config = {
   stream: 'main' | 'sub';
   label: string;
   use_tcp_transport: boolean;
-  connection_mode?: 'lan' | 'p2p' | 'auto' | 'cartrack_relay';
+  connection_mode?: 'lan' | 'p2p' | 'auto' | 'cartrack_cloud' | 'cartrack_relay' | 'cloud_hls';
   p2p_local_port?: number;
   device_serial?: string;
   device_type?: string;
@@ -350,7 +361,7 @@ export type DahuaHeroA1Public = {
   configured: boolean;
   rtsp_url_masked: string;
   source_token: string;
-  connection_mode?: 'lan' | 'p2p' | 'auto' | 'cartrack_relay';
+  connection_mode?: 'lan' | 'p2p' | 'auto' | 'cartrack_cloud' | 'cartrack_relay' | 'cloud_hls';
   cartrack_relay?: {
     publish_url?: string | null;
     view_url?: string | null;
@@ -417,6 +428,16 @@ export type WifiNetwork = {
   encrypt?: number | string | null;
 };
 
+export type ImouUsageStats = {
+  app_id?: string | null;
+  blocked_sec?: number;
+  blocked?: boolean;
+  calls_since_start?: number;
+  top_methods?: Array<{ method: string; count: number }>;
+  free_tier_hint?: string;
+  recovery?: string;
+};
+
 export type CameraProvisionResult = {
   ok: boolean;
   error?: string;
@@ -473,7 +494,7 @@ export const camerasApi = {
       { timeout: 35000 },
     ),
   wifiScan: (id: string) =>
-    api.post<{ ok: boolean; error?: string; networks?: WifiNetwork[] }>(
+    api.post<{ ok: boolean; error?: string; networks?: WifiNetwork[]; cached?: boolean; retry_after_sec?: number }>(
       `/api/cameras/${encodeURIComponent(id)}/wifi/scan`,
       {},
       { timeout: 50000 },
@@ -522,10 +543,55 @@ export const camerasApi = {
   p2pStatus: () => api.get<{ connection_mode: string; tunnel: Record<string, unknown> }>(
     '/api/cameras/dahua/hero-a1/p2p/status',
   ),
+  cloudTunnelStart: (data?: { username?: string; password?: string }) =>
+    api.post('/api/cameras/dahua/hero-a1/cloud-tunnel/start', data ?? {}, { timeout: 90000 }),
+  cloudTunnelStatus: () =>
+    api.get<{ mode: string; configured: boolean; tunnel: Record<string, unknown> }>(
+      '/api/cameras/dahua/hero-a1/cloud-tunnel/status',
+    ),
+  imouBindStatus: () =>
+    api.get<{ ok: boolean; serial?: string; bound?: { isBind?: boolean; isMine?: boolean }; error?: string; code?: string; usage?: ImouUsageStats }>(
+      '/api/cameras/dahua/hero-a1/imou/status',
+      { timeout: 15000 },
+    ),
+  imouUsage: () =>
+    api.get<ImouUsageStats>('/api/cameras/dahua/hero-a1/imou/usage', { timeout: 8000 }),
+  imouBindHeroA1: (data?: { password?: string }) =>
+    api.post<{ ok: boolean; bind: Record<string, unknown>; connection_mode: string }>(
+      '/api/cameras/dahua/hero-a1/imou/bind',
+      data ?? {},
+      { timeout: 60000 },
+    ),
+  localSetupDiscover: () =>
+    api.get<{
+      ok: boolean;
+      cameras: Array<{ host: string; serial?: string }>;
+      requires_shop_network?: boolean;
+      remote_server?: boolean;
+      hint?: string;
+    }>('/api/cameras/dahua/hero-a1/local-setup/discover', { timeout: 12000 }),
+  localSetupWifiScan: (data: { host: string; password?: string; username?: string }) =>
+    api.post<{ ok: boolean; networks?: Array<{ ssid: string; bssid: string; intensity: number }>; error?: string }>(
+      '/api/cameras/dahua/hero-a1/local-setup/wifi-scan',
+      data,
+      { timeout: 20000 },
+    ),
+  localSetupWifiConnect: (data: {
+    host: string;
+    ssid: string;
+    wifi_password?: string;
+    device_password?: string;
+  }) =>
+    api.post<{ ok: boolean; message?: string; error?: string }>(
+      '/api/cameras/dahua/hero-a1/local-setup/wifi-connect',
+      data,
+      { timeout: 30000 },
+    ),
   diagnoseHeroA1: () =>
     api.get<{
       pc_ips: string[];
       camera_host: string;
+      remote_server?: boolean;
       subnet_mismatch: boolean;
       lan_rtsp_reachable: boolean;
       cloud_tunnel_running: boolean;

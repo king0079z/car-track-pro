@@ -30,7 +30,7 @@ DEFAULT_DAHUA_HERO_A1: dict[str, Any] = {
     "stream": "sub",  # sub = lower latency for live ANPR; main = full 1080p
     "label": "Dahua Hero A1",
     "use_tcp_transport": True,
-    # lan | auto | p2p | cartrack_relay (your media server, not Dahua Easy4IP)
+    # lan | auto | p2p | cartrack_cloud (VPS tunnel, no shop PC) | cartrack_relay (site PC → MediaMTX)
     "connection_mode": "lan",
     "cartrack_relay_publish_url": "",
     "cartrack_relay_view_url": "",
@@ -49,6 +49,9 @@ DEFAULT_DAHUA_HERO_A1: dict[str, Any] = {
     "openapi_base_url": "",
     "openapi_channel": "0",
     "openapi_prefer_hd": True,
+    # When True the user explicitly removed this camera from Settings; env
+    # overrides (DAHUA_* on cloud deploy) must not resurrect it in the UI.
+    "user_removed": False,
 }
 
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -64,7 +67,9 @@ def _normalize_connection_mode(raw: str | None) -> str:
         return "p2p"
     if s == "auto":
         return "auto"
-    if s in ("cartrack", "cartrack_relay", "cartrack_cloud"):
+    if s in ("cartrack_cloud", "cartrack_remote", "remote_cloud"):
+        return "cartrack_cloud"
+    if s in ("cartrack", "cartrack_relay"):
         return "cartrack_relay"
     return "lan"
 
@@ -112,7 +117,7 @@ def _env_dahua_overrides() -> dict[str, Any]:
     if base_url:
         patch["openapi_base_url"] = base_url
     patch["openapi_channel"] = (getattr(settings, "IMOU_CHANNEL", "") or "0").strip() or "0"
-    patch["openapi_prefer_hd"] = bool(getattr(settings, "IMOU_PREFER_HD", True))
+    patch["openapi_prefer_hd"] = bool(getattr(settings, "IMOU_PREFER_HD", False))
     if username:
         patch["username"] = username
     if host:
@@ -131,8 +136,8 @@ def _env_dahua_overrides() -> dict[str, Any]:
 
     if settings.DAHUA_ENABLED:
         patch["enabled"] = True
-    elif has_credentials and mode in ("p2p", "auto"):
-        # Cloud VPS: serial + password + p2p mode → enable without extra flag
+    elif has_credentials and mode in ("p2p", "auto", "cartrack_cloud"):
+        # Cloud VPS: serial + password + remote cloud mode → enable without extra flag
         patch["enabled"] = True
     elif has_cloud_hls:
         # Cloud VPS: serial + OpenAPI creds + cloud_hls mode → enable automatically
@@ -165,9 +170,30 @@ def _merge_dahua(raw: dict[str, Any] | None) -> dict[str, Any]:
     for key in DEFAULT_DAHUA_HERO_A1:
         if key in raw and raw[key] is not None:
             out[key] = raw[key]
+    user_removed = bool(raw.get("user_removed"))
+    saved_hd_pref = raw.get("openapi_prefer_hd")
+    saved_mode_raw = raw.get("connection_mode")
+    saved_mode = (
+        _normalize_connection_mode(str(saved_mode_raw))
+        if saved_mode_raw is not None and str(saved_mode_raw).strip()
+        else None
+    )
     env_patch = _env_dahua_overrides()
     if env_patch:
+        env_hd = env_patch.pop("openapi_prefer_hd", None)
+        # User-selected connection mode in cameras.json wins over DAHUA_CONNECTION_MODE env.
+        if saved_mode is not None:
+            env_patch.pop("connection_mode", None)
         out.update(env_patch)
+        if saved_mode is not None:
+            out["connection_mode"] = saved_mode
+        if saved_hd_pref is not None:
+            out["openapi_prefer_hd"] = bool(saved_hd_pref)
+        elif env_hd is not None:
+            out["openapi_prefer_hd"] = bool(env_hd)
+    if user_removed:
+        out["user_removed"] = True
+        out["enabled"] = False
     return out
 
 
@@ -186,9 +212,9 @@ def load_camera_config() -> dict[str, Any]:
 def save_camera_config(data: dict[str, Any]) -> dict[str, Any]:
     current = load_camera_config()
     if "dahua_hero_a1" in data and isinstance(data["dahua_hero_a1"], dict):
-        # Persist UI edits to file; env overrides still apply on next load.
+        # Persist UI edits to file as-is; env overrides apply on load only.
         raw = _read_raw()
-        merged_file = _merge_dahua({**raw.get("dahua_hero_a1", {}), **data["dahua_hero_a1"]})
+        merged_file = {**raw.get("dahua_hero_a1", {}), **data["dahua_hero_a1"]}
         raw["dahua_hero_a1"] = merged_file
         # Never drop the multi-camera registry when saving the legacy profile.
         _write_raw(raw)
@@ -304,7 +330,13 @@ def _merge_camera(raw: dict[str, Any] | None) -> dict[str, Any]:
 
 def _hero_as_camera() -> dict[str, Any] | None:
     """Expose the legacy ``dahua_hero_a1`` profile as camera id 'hero-a1'."""
-    cfg = _merge_dahua(_read_raw().get("dahua_hero_a1"))
+    raw = _read_raw()
+    hero_raw = raw.get("dahua_hero_a1") if isinstance(raw.get("dahua_hero_a1"), dict) else {}
+    if hero_raw.get("user_removed"):
+        return None
+    cfg = _merge_dahua(hero_raw)
+    if cfg.get("user_removed"):
+        return None
     configured = bool(cfg.get("enabled") or cfg.get("device_serial") or cfg.get("host"))
     if not configured:
         return None
@@ -455,6 +487,8 @@ def _camera_patch_to_hero(patch: dict[str, Any]) -> dict[str, Any]:
         "enabled", "host", "rtsp_port", "http_port", "username", "password",
         "stream", "use_tcp_transport", "connection_mode", "device_serial",
         "device_type", "security_code", "p2p_local_port", "p2p_randsalt",
+        "openapi_app_id", "openapi_app_secret", "openapi_base_url",
+        "openapi_channel", "openapi_prefer_hd",
     ):
         if key in patch:
             hero[key] = patch[key]
@@ -483,6 +517,8 @@ def add_camera(data: dict[str, Any]) -> dict[str, Any]:
     arr.append(cam)
     raw["cameras"] = arr
     _write_raw(raw)
+    if cam["type"] == "dahua_p2p":
+        _restore_hero_a1()
     return cam
 
 
@@ -507,8 +543,28 @@ def update_camera(camera_id: str, patch: dict[str, Any]) -> dict[str, Any] | Non
     return None
 
 
+def _dismiss_hero_a1() -> None:
+    """Hide the legacy/env-injected Dahua profile after the user deletes it."""
+    raw = _read_raw()
+    hero = raw.get("dahua_hero_a1") if isinstance(raw.get("dahua_hero_a1"), dict) else {}
+    hero = {**hero, "enabled": False, "user_removed": True}
+    raw["dahua_hero_a1"] = hero
+    _write_raw(raw)
+
+
+def _restore_hero_a1() -> None:
+    """Clear the dismissed flag when the user adds a Dahua cloud camera again."""
+    raw = _read_raw()
+    hero = raw.get("dahua_hero_a1") if isinstance(raw.get("dahua_hero_a1"), dict) else {}
+    if hero.get("user_removed"):
+        hero = {**hero, "user_removed": False}
+        raw["dahua_hero_a1"] = hero
+        _write_raw(raw)
+
+
 def delete_camera(camera_id: str) -> bool:
     cid = (camera_id or "").strip()
+    cam = get_camera(cid)
     raw = _read_raw()
     arr = raw.get("cameras") if isinstance(raw.get("cameras"), list) else []
     kept = [c for c in arr if not (isinstance(c, dict) and c.get("id") == cid)]
@@ -516,10 +572,12 @@ def delete_camera(camera_id: str) -> bool:
     if removed:
         raw["cameras"] = kept
         _write_raw(raw)
+        if cam and str(cam.get("type") or "").lower() in ("dahua_p2p", "dahua", "p2p"):
+            _dismiss_hero_a1()
         return True
-    # Legacy hero-a1 (not in array) → disable it.
+    # Legacy hero-a1 (not in array) → hide from UI even when DAHUA_* env is set.
     if cid == "hero-a1":
-        save_camera_config({"dahua_hero_a1": {"enabled": False}})
+        _dismiss_hero_a1()
         return True
     return False
 

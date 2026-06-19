@@ -17,7 +17,7 @@ from ..config import settings
 from ..models.anpr import ANPRDetection
 from ..models.visit import Visit, VisitStatus
 from ..models.vehicle import Vehicle
-from ..utils.plates import format_qatar_plate, plates_match, plates_match
+from ..utils.plates import format_qatar_plate, plates_match
 
 
 def resume_gap() -> timedelta:
@@ -25,8 +25,10 @@ def resume_gap() -> timedelta:
 
 
 def camera_recording_frozen(visit: Visit | None) -> bool:
-    """True once supervisor has signed — camera dwell must not increase."""
-    return bool(visit and visit.signature_captured_at)
+    """True once the work order is checked out — camera dwell must not increase."""
+    if not visit:
+        return False
+    return visit.status == VisitStatus.COMPLETED or visit.exit_time is not None
 
 
 def _vehicle_for_plate(db: Session, plate: str) -> Vehicle | None:
@@ -38,6 +40,12 @@ def _vehicle_for_plate(db: Session, plate: str) -> Vehicle | None:
         if plates_match(v.plate_number or "", plate_u):
             return v
     return None
+
+
+def _as_utc(dt: datetime | None) -> datetime | None:
+    if dt is None:
+        return None
+    return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
 
 
 def last_plate_activity_at(db: Session, plate: str, *, visit_id: int | None = None) -> datetime | None:
@@ -56,7 +64,8 @@ def last_plate_activity_at(db: Session, plate: str, *, visit_id: int | None = No
         matched = [r for r in candidates if plates_match(r.plate, plate_u)]
     if not matched:
         return None
-    return max(r.detected_at for r in matched if r.detected_at)
+    latest = max(_as_utc(r.detected_at) for r in matched if r.detected_at)
+    return latest
 
 
 def find_recording_visit(db: Session, plate: str) -> Visit | None:
@@ -72,7 +81,6 @@ def find_recording_visit(db: Session, plate: str) -> Visit | None:
         db.query(Visit)
         .filter(
             Visit.vehicle_id == vehicle.id,
-            Visit.signature_captured_at.is_(None),
             Visit.status.in_([
                 VisitStatus.WAITING,
                 VisitStatus.IN_SERVICE,
@@ -87,9 +95,7 @@ def find_recording_visit(db: Session, plate: str) -> Visit | None:
 
     last = last_plate_activity_at(db, plate_u, visit_id=visit.id)
     if last is not None:
-        now = datetime.now(UTC)
-        last_utc = last if last.tzinfo else last.replace(tzinfo=UTC)
-        if now - last_utc > resume_gap():
+        if datetime.now(UTC) - last > resume_gap():
             return None
     return visit
 
@@ -113,13 +119,61 @@ def segment_already_synced(
 
 
 def recompute_visit_camera_seconds(db: Session, visit: Visit) -> float:
-    """Sum in-frame seconds from all ANPR rows linked to this visit."""
+    """Sum shop presence time from ANPR rows (falls back to in-frame segment dwell)."""
     db.flush()
     rows = db.query(ANPRDetection).filter(ANPRDetection.visit_id == visit.id).all()
-    total = sum(float(r.duration_sec or 0) for r in rows)
+    presence = [float(r.presence_duration_sec) for r in rows if r.presence_duration_sec is not None]
+    if presence:
+        total = max(presence)
+    else:
+        total = sum(float(r.duration_sec or 0) for r in rows)
     visit.anpr_camera_seconds = round(total, 3)
     db.flush()
     return visit.anpr_camera_seconds
+
+
+def refresh_live_presence_from_manifest(
+    db: Session,
+    *,
+    job_id: str,
+    rows: list[dict],
+) -> int:
+    """Push live shop-presence seconds to open unsigned work orders."""
+    from ..utils.plates import format_qatar_plate, sync_eligible_plate
+
+    updated = 0
+    jurisdiction = str(getattr(settings, "PLATE_JURISDICTION", "qa_uk") or "qa_uk")
+    seen_plates: set[str] = set()
+    for v in rows or []:
+        pds = v.get("presence_duration_sec")
+        if pds is None:
+            continue
+        plate_raw = str(v.get("plate") or "").strip()
+        if not plate_raw or plate_raw in ("—", "…", "Unknown", "UNKNOWN"):
+            continue
+        if not sync_eligible_plate(plate_raw, jurisdiction=jurisdiction):
+            continue
+        plate_key = format_qatar_plate(plate_raw).upper()
+        if plate_key in seen_plates:
+            continue
+        seen_plates.add(plate_key)
+        visit = find_recording_visit(db, plate_key)
+        if visit is None or camera_recording_frozen(visit):
+            continue
+        secs = round(float(pds), 3)
+        visit.anpr_camera_seconds = secs
+        latest = (
+            db.query(ANPRDetection)
+            .filter(ANPRDetection.job_id == job_id, ANPRDetection.plate == plate_key)
+            .order_by(ANPRDetection.id.desc())
+            .first()
+        )
+        if latest is not None:
+            latest.presence_duration_sec = secs
+        updated += 1
+    if updated:
+        db.flush()
+    return updated
 
 
 def apply_camera_segment(
@@ -183,6 +237,6 @@ def link_job_segments_to_visits(db: Session, job_id: str) -> int:
 
 
 def freeze_visit_camera_recording(db: Session, visit: Visit) -> None:
-    """Call when supervisor signs — stop adding camera dwell; shop timing takes over."""
+    """Call on checkout — finalize camera dwell totals."""
     if visit.id:
         recompute_visit_camera_seconds(db, visit)

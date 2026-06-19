@@ -13,7 +13,7 @@ from ..utils.auth import get_current_user, require_page
 from ..utils.helpers import generate_visit_number, calculate_duration
 from ..models.user import User
 from ..services.audit_service import create_audit_log
-from ..services.service_duration import sync_visit_shop_duration
+from ..services.service_duration import sync_visit_shop_duration, visit_shop_duration_minutes
 from ..services.camera_presence import freeze_visit_camera_recording
 from ..services.bay_inference import resolve_bay_for_detection
 from ..services.permissions import user_owns_visit, apply_visit_scope, has_org_wide_access
@@ -23,6 +23,26 @@ router = APIRouter(prefix="/api/visits", tags=["Visits"])
 
 _MAX_ANPR_LINK = 50
 _MAX_ENTRY_ANCHOR_SEC = 6 * 3600
+
+
+def _mark_payment_paid_if_completed(visit: Visit) -> None:
+    """Completed work orders always have finalized payment."""
+    if visit.status == VisitStatus.COMPLETED:
+        visit.payment_status = "paid"
+
+
+def backfill_completed_payment_status(db: Session) -> int:
+    """Fix legacy rows where completed visits were left unpaid."""
+    rows = (
+        db.query(Visit)
+        .filter(Visit.status == VisitStatus.COMPLETED, Visit.payment_status != "paid")
+        .all()
+    )
+    for visit in rows:
+        visit.payment_status = "paid"
+    if rows:
+        db.commit()
+    return len(rows)
 
 
 def _apply_anpr_links_on_create(
@@ -157,7 +177,11 @@ def create_visit(data: VisitCreate, db: Session = Depends(get_db), current_user:
     if data.vehicle_id:
         vehicle = db.query(Vehicle).filter(Vehicle.id == data.vehicle_id).first()
     elif data.plate_number:
-        vehicle = db.query(Vehicle).filter(Vehicle.plate_number == data.plate_number.upper()).first()
+        # Exact match first, then conservative fuzzy match (OCR drift /
+        # truncated read) so a misread plate cannot spawn a duplicate vehicle.
+        from ..services.vehicle_identity import find_vehicle_for_plate
+
+        vehicle = find_vehicle_for_plate(db, data.plate_number, fuzzy=True)
         if not vehicle:
             vehicle = Vehicle(
                 plate_number=data.plate_number.upper(),
@@ -253,9 +277,6 @@ def create_visit(data: VisitCreate, db: Session = Depends(get_db), current_user:
         description=f"Opened work order {visit.visit_number}" + (f" · {plate}" if plate else ""),
         commit=False,
     )
-    if visit.signature_captured_at or visit.exit_time:
-        freeze_visit_camera_recording(db, visit)
-        sync_visit_shop_duration(db, visit)
     db.commit()
     return _visit_out(db, _load_visit(db, visit.id))
 
@@ -290,7 +311,7 @@ def list_in_shop_vehicles(
         svc_names = ", ".join(
             si.service.name for si in (v.service_items or []) if si.service and si.service.name
         )[:120]
-        mins = calculate_duration(v.entry_time, None) if v.entry_time else 0.0
+        mins = visit_shop_duration_minutes(v) or 0.0
         out.append(
             InShopVehicleOut(
                 plate_number=plate,
@@ -362,7 +383,12 @@ def get_active_visits(db: Session = Depends(get_db), current_user: User = Depend
 
 @router.get("/{visit_id}", response_model=VisitOut)
 def get_visit(visit_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_page("visits"))):
-    return _visit_out(db, _load_visit(db, visit_id, current_user))
+    visit = _load_visit(db, visit_id, current_user)
+    if visit.status != VisitStatus.COMPLETED:
+        sync_visit_shop_duration(db, visit)
+        db.commit()
+        visit = _load_visit(db, visit_id, current_user)
+    return _visit_out(db, visit)
 
 
 @router.patch("/{visit_id}", response_model=VisitOut)
@@ -375,6 +401,7 @@ def update_visit(
     visit = _load_visit(db, visit_id, current_user)
     update_data = data.model_dump(exclude_unset=True)
 
+    was_completed = visit.status == VisitStatus.COMPLETED
     if "status" in update_data and update_data["status"] == VisitStatus.COMPLETED:
         if not visit.exit_time and "exit_time" not in update_data:
             visit.exit_time = datetime.now(UTC)
@@ -386,12 +413,19 @@ def update_visit(
         if not visit.signature_captured_at:
             visit.signature_captured_at = datetime.now(UTC)
             visit.supervisor_signed_by = current_user.id
+
+    if visit.status == VisitStatus.COMPLETED:
         freeze_visit_camera_recording(db, visit)
         sync_visit_shop_duration(db, visit)
-    elif visit.status == VisitStatus.COMPLETED and visit.entry_time and visit.exit_time:
-        visit.duration_minutes = calculate_duration(visit.entry_time, visit.exit_time)
+
+    _mark_payment_paid_if_completed(visit)
 
     db.commit()
+
+    if not was_completed and visit.status == VisitStatus.COMPLETED:
+        from ..services.whatsapp_notify import notify_work_order_completed
+
+        notify_work_order_completed(visit.id)
     return _load_visit(db, visit.id, current_user)
 
 
@@ -400,7 +434,7 @@ def checkout_visit(visit_id: int, db: Session = Depends(get_db), current_user: U
     visit = _load_visit(db, visit_id, current_user)
     visit.exit_time = datetime.now(UTC)
     visit.status = VisitStatus.COMPLETED
-    visit.duration_minutes = calculate_duration(visit.entry_time, visit.exit_time)
+    visit.payment_status = "paid"
     freeze_visit_camera_recording(db, visit)
     sync_visit_shop_duration(db, visit)
     create_audit_log(
@@ -415,7 +449,27 @@ def checkout_visit(visit_id: int, db: Session = Depends(get_db), current_user: U
         commit=False,
     )
     db.commit()
+
+    from ..services.whatsapp_notify import notify_work_order_completed
+
+    notify_work_order_completed(visit.id)
     return _load_visit(db, visit.id, current_user)
+
+
+@router.post("/{visit_id}/whatsapp/resend")
+def resend_visit_whatsapp(
+    visit_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_page("visits")),
+):
+    """Send (or resend) the completion WhatsApp receipt to the customer."""
+    _load_visit(db, visit_id, current_user)
+    from ..services.whatsapp_notify import send_work_order_completion
+
+    result = send_work_order_completion(visit_id, force=True)
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail=result.get("error") or "WhatsApp send failed")
+    return result
 
 
 @router.post("/{visit_id}/signature", response_model=VisitOut)
@@ -430,9 +484,6 @@ def capture_signature(
     visit.supervisor_signature = sig
     visit.supervisor_signed_by = current_user.id if sig else None
     visit.signature_captured_at = datetime.now(UTC) if sig else None
-    if sig:
-        freeze_visit_camera_recording(db, visit)
-        sync_visit_shop_duration(db, visit)
     db.commit()
     return _load_visit(db, visit.id, current_user)
 

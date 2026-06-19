@@ -15,7 +15,7 @@ import {
 } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { camerasApi, type CameraInput, type RegistryCamera } from '../../services/api';
-import { CameraWifiDialog } from '../../components/CameraWifiDialog';
+import { CameraChangeWifiDialog } from '../../components/CameraChangeWifiDialog';
 import { CameraSetupWizard } from '../../components/CameraSetupWizard';
 
 function extractApiError(err: unknown): string {
@@ -205,7 +205,7 @@ export const CamerasManager: React.FC = () => {
                   <button type="button" className="btn btn-secondary btn-sm" disabled={isBusy} onClick={() => void test(cam)}>
                     Test
                   </button>
-                  {cam.type === 'dahua_p2p' && cam.device_serial && (
+                  {(cam.type === 'dahua_p2p' || cam.id === 'hero-a1') && (
                     <button type="button" className="btn btn-secondary btn-sm" onClick={() => setWifiCam(cam)}>
                       <Wifi size={13} /> Wi-Fi
                     </button>
@@ -243,9 +243,10 @@ export const CamerasManager: React.FC = () => {
       />
 
       {wifiCam && (
-        <CameraWifiDialog
+        <CameraChangeWifiDialog
           cameraId={wifiCam.id}
           cameraName={wifiCam.name}
+          deviceSerial={wifiCam.device_serial || ''}
           isOpen={!!wifiCam}
           onClose={() => setWifiCam(null)}
         />

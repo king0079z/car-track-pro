@@ -100,7 +100,7 @@ def run_auto_checkout_pass() -> int:
             exit_at = max(last_seen, entry)
             visit.exit_time = exit_at
             visit.status = VisitStatus.COMPLETED
-            visit.duration_minutes = calculate_duration(visit.entry_time, visit.exit_time)
+            visit.payment_status = "paid"
             freeze_visit_camera_recording(db, visit)
             sync_visit_shop_duration(db, visit)
             create_audit_log(

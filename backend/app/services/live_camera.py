@@ -230,10 +230,13 @@ def open_capture_for_live(source: str, *, strict_index: bool = True) -> cv2.Vide
     if dahua_token is not None:
         resolved = resolve_dahua_source(dahua_token)
         if not resolved:
-            raise RuntimeError(
-                "Dahua camera is not reachable yet. Open Settings → Dahua camera, "
-                "start the cloud tunnel, or confirm LAN IP on the same Wi‑Fi."
-            )
+            # Let analyze_live_stream's reconnect loop retry (P2P tunnel may still be starting).
+            cap = cv2.VideoCapture()
+            try:
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            except Exception:
+                pass
+            return cap
         s = resolved
     if s.isdigit():
         return open_usb_camera(int(s), strict_index=strict_index)

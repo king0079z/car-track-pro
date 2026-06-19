@@ -47,7 +47,7 @@ const SECTIONS: SettingsSection[] = [
   { id: 'revenue', label: 'Revenue', icon: DollarSign, hint: 'Tax display and staff visibility' },
   { id: 'notifications', label: 'Notifications', icon: Bell, hint: 'Alerts and reporting recipients' },
   { id: 'cameras', label: 'Cameras', icon: Video, hint: 'Add and manage many cameras (Dahua cloud + RTSP/NVR)' },
-  { id: 'camera-cloud', label: 'Camera cloud', icon: Cloud, hint: 'Connect DH-H3A via Easy4IP and open live feed' },
+  { id: 'camera-cloud', label: 'Camera cloud', icon: Cloud, hint: 'Guided wizard — Wi‑Fi, connect, live feed' },
   { id: 'integrations', label: 'AI & vision', icon: Radar, hint: 'ANPR, cameras, and automation defaults' },
   { id: 'privacy', label: 'Privacy & audit', icon: Eye, hint: 'Logging posture and diagnostics' },
   { id: 'errors', label: 'Error log', icon: Bug, hint: 'Plate monitoring and application diagnostics' },
@@ -702,8 +702,8 @@ export const Settings: React.FC = () => {
           {active === 'camera-cloud' && (
             <>
               <SectionHeader
-                title="Camera cloud connect"
-                subtitle="Guided setup — connect your DH-H3A, verify video, then open the live ANPR feed automatically."
+                title="Camera cloud"
+                subtitle="Guided wizard — pick your situation, choose a connection type, and open live video when ready."
               />
               <DahuaCloudConnect />
             </>

@@ -59,6 +59,39 @@ from ..utils.auth import require_admin
 router = APIRouter(prefix="/api/cameras", tags=["Cameras"])
 
 
+def _normalize_dahua_serial_fields(data: dict[str, Any]) -> None:
+    """If the user pasted a full QR payload into device_serial, parse it in-place."""
+    serial = str(data.get("device_serial") or "").strip()
+    if not serial:
+        return
+    looks_like_qr = serial.startswith("{") or ("SN:" in serial.upper() and "DT:" in serial.upper())
+    if looks_like_qr:
+        try:
+            parsed = parse_dahua_qr_payload(serial)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        suggested = parsed.get("suggested_config") or {}
+        data["device_serial"] = str(suggested.get("device_serial") or "").strip().upper()
+        if suggested.get("device_type") and not data.get("device_type"):
+            data["device_type"] = suggested["device_type"]
+        if suggested.get("security_code") and not data.get("security_code"):
+            data["security_code"] = suggested["security_code"]
+    else:
+        data["device_serial"] = serial.upper()
+
+
+def _cloud_bind_if_needed(cam: dict[str, Any], result: dict[str, Any]) -> bool:
+    """Bind Dahua cloud_hls cameras to the Open Platform app. Returns True if bind ok."""
+    if cam.get("type") != "dahua_p2p" or _connection_mode(cam) != "cloud_hls":
+        return True
+    bind = ensure_device_bound(cam)
+    result["bind"] = bind
+    if not bind.get("ok"):
+        result["provision"] = {"ok": False, "error": bind.get("error", "Cloud bind failed")}
+        return False
+    return True
+
+
 class DahuaConfigPatch(BaseModel):
     enabled: bool | None = None
     host: str | None = None
@@ -89,7 +122,24 @@ class DahuaTestBody(BaseModel):
     password: str | None = None
     rtsp_port: int | None = Field(None, ge=1, le=65535)
     stream: str | None = None
+    connection_mode: str | None = None
     use_tcp_transport: bool | None = True
+
+
+class LocalWifiConnectBody(BaseModel):
+    host: str = Field(..., min_length=3, max_length=64)
+    ssid: str = Field(..., min_length=1, max_length=64)
+    wifi_password: str = ""
+    device_password: str = ""
+    username: str = "admin"
+    http_port: int = Field(80, ge=1, le=65535)
+
+
+class LocalWifiProbeBody(BaseModel):
+    host: str = Field(..., min_length=3, max_length=64)
+    username: str = "admin"
+    password: str = ""
+    http_port: int = Field(80, ge=1, le=65535)
 
 
 class PtzBody(BaseModel):
@@ -212,7 +262,8 @@ def update_dahua_hero_a1(
     if patch.get("password") == "********":
         merged["password"] = current["dahua_hero_a1"].get("password") or ""
     save_camera_config({"dahua_hero_a1": merged})
-    if _connection_mode(merged) in ("p2p", "auto") and merged.get("enabled") and merged.get("device_serial") and merged.get("password"):
+    # Bind only via POST /imou/bind — not on every settings save (saves Imou API quota).
+    if _connection_mode(merged) in ("p2p", "auto", "cartrack_cloud") and merged.get("enabled") and merged.get("device_serial") and merged.get("password"):
         from ..services.dahua_p2p_tunnel import prewarm_cloud_tunnel_async
 
         prewarm_cloud_tunnel_async()
@@ -239,6 +290,8 @@ def test_dahua_hero_a1(
     username = str(data.get("username") or cfg.get("username") or "admin")
     stream = str(data.get("stream") or cfg.get("stream") or "sub")
 
+    if data.get("connection_mode"):
+        cfg = {**cfg, "connection_mode": str(data["connection_mode"]).strip()}
     mode = _connection_mode(cfg)
     if mode in ("p2p", "auto"):
         lan_host = str(cfg.get("host") or "").strip()
@@ -386,6 +439,78 @@ def test_dahua_hero_a1(
             },
         )
 
+    if mode == "cartrack_cloud":
+        from ..services.cartrack_cloud_tunnel import ensure_tunnel_running
+
+        merged = {**cfg, "password": str(password)}
+        tunnel = ensure_tunnel_running(merged)
+        url = resolve_dahua_source("dahua-hero-a1")
+        if url:
+            result = probe_stream(
+                url,
+                use_tcp=use_tcp,
+                username=username,
+                password=str(password),
+                timeout_sec=40.0,
+            )
+            result["connection_mode"] = "cartrack_cloud"
+            result["resolved_url"] = url.split("@")[-1] if "@" in url else url[:80]
+            result["tunnel"] = tunnel.get("status") or get_p2p_tunnel_manager().status()
+            if result.get("ok"):
+                return JSONResponse(result)
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": (tunnel.get("error") if isinstance(tunnel, dict) else None) or "CarTrack cloud tunnel failed",
+                "hint": "Close Imou/DMSS on all phones (one viewer at a time). Wait up to 90 seconds and try again.",
+                "tunnel": tunnel.get("status") if isinstance(tunnel, dict) else tunnel,
+            },
+        )
+
+    if mode == "cloud_hls":
+        from ..services.easy4ip_openapi import cached_check_bound, ensure_device_bound, get_openapi_client, resolve_easy4ip_hls
+
+        client = get_openapi_client(cfg)
+        serial = str(cfg.get("device_serial") or "").strip()
+        skip_bind = False
+        if client and serial:
+            try:
+                st = cached_check_bound(client, serial)
+                skip_bind = bool(st.get("isMine"))
+            except Exception:
+                skip_bind = False
+        if not skip_bind:
+            bind = ensure_device_bound({**cfg, "password": str(password)})
+            if not bind.get("ok"):
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "message": bind.get("error") or "Imou CarPro bind required",
+                        "code": bind.get("code"),
+                        "hint": "Click Bind camera to CarPro first, then connect.",
+                    },
+                )
+        url = resolve_easy4ip_hls(cfg)
+        if url:
+            result = probe_stream(
+                url,
+                use_tcp=use_tcp,
+                username=username,
+                password=str(password),
+                timeout_sec=45.0,
+            )
+            result["connection_mode"] = "cloud_hls"
+            result["resolved_url"] = url[:80] + "..." if len(url) > 80 else url
+            if result.get("ok"):
+                return JSONResponse(result)
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": "Imou cloud HLS stream unavailable",
+                "hint": "Bind camera to CarPro, confirm camera is online, then retry.",
+            },
+        )
+
     host = str(data.get("host") or cfg.get("host") or "").strip()
     if not host:
         raise HTTPException(status_code=400, detail="Enter the camera IP/hostname (set in DMSS app).")
@@ -470,7 +595,8 @@ async def dahua_p2p_status(current_user: User = Depends(require_admin)) -> JSONR
         cfg = dahua_hero_a1_config()
         tunnel = get_p2p_tunnel_manager().status()
         preview_url = None
-        if _connection_mode(cfg) == "p2p" and tunnel.get("running"):
+        mode = _connection_mode(cfg)
+        if mode in ("p2p", "cartrack_cloud") and tunnel.get("running"):
             try:
                 preview_url = build_rtsp_url(
                     host="127.0.0.1",
@@ -488,6 +614,203 @@ async def dahua_p2p_status(current_user: User = Depends(require_admin)) -> JSONR
         }
 
     return JSONResponse(await asyncio.to_thread(_payload))
+
+
+@router.post("/dahua/hero-a1/cloud-tunnel/start")
+def start_cartrack_cloud_tunnel(
+    body: DahuaTestBody | None = None,
+    current_user: User = Depends(require_admin),
+) -> JSONResponse:
+    """Start CarTrack Cloud tunnel (VPS-only remote access, no shop PC)."""
+    from ..services.cartrack_cloud_tunnel import ensure_tunnel_running
+
+    cfg = dahua_hero_a1_config()
+    data = body.model_dump(exclude_unset=True) if body else {}
+    password = data.get("password")
+    if password == "********" or password is None:
+        password = cfg.get("password") or ""
+    password = str(password)
+    if not password:
+        raise HTTPException(
+            status_code=400,
+            detail="Enter the device password, click Save camera, then Connect.",
+        )
+    username = str(data.get("username") or cfg.get("username") or "admin")
+    if data.get("password") and data.get("password") != "********":
+        merged = {**cfg, "password": password, "username": username, "connection_mode": "cartrack_cloud"}
+        save_camera_config({"dahua_hero_a1": merged})
+    result = ensure_tunnel_running()
+    if not result.get("ok"):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": result.get("error") or "CarTrack Cloud tunnel failed",
+                "detail": result.get("detail"),
+                "hint": (
+                    "Camera must be online (power + Wi‑Fi). Close Imou/DMSS live view on phones — "
+                    "only one remote stream at a time."
+                ),
+            },
+        )
+    return JSONResponse({
+        **result,
+        "message": "CarTrack Cloud tunnel is connecting. Live video may take up to 60 seconds.",
+    })
+
+
+@router.get("/dahua/hero-a1/cloud-tunnel/status")
+async def cartrack_cloud_tunnel_status(current_user: User = Depends(require_admin)) -> JSONResponse:
+    from ..services.cartrack_cloud_tunnel import tunnel_status
+
+    return JSONResponse(await asyncio.to_thread(tunnel_status))
+
+
+@router.get("/dahua/hero-a1/imou/status")
+async def imou_bind_status(current_user: User = Depends(require_admin)) -> JSONResponse:
+    """Check whether the camera is bound to our Imou/Easy4IP Open Platform app (CarPro)."""
+    from ..services.easy4ip_openapi import Easy4IpError, cached_check_bound, get_openapi_client, openapi_usage_stats
+
+    cfg = dahua_hero_a1_config()
+    serial = str(cfg.get("device_serial") or "").strip()
+    if not serial:
+        raise HTTPException(status_code=400, detail="Enter camera serial first.")
+    client = get_openapi_client(cfg)
+    if client is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Imou Open Platform credentials missing — set IMOU_APP_ID and IMOU_APP_SECRET.",
+        )
+    try:
+        bound = await asyncio.to_thread(cached_check_bound, client, serial)
+    except Easy4IpError as exc:
+        return JSONResponse({"ok": False, "serial": serial, "error": str(exc), "code": exc.code})
+    usage = openapi_usage_stats(client.app_id)
+    return JSONResponse({"ok": True, "serial": serial, "bound": bound, "usage": usage})
+
+
+@router.get("/dahua/hero-a1/imou/usage")
+async def imou_usage_status(current_user: User = Depends(require_admin)) -> JSONResponse:
+    """Imou API quota snapshot (calls since restart, local OP1013 backoff)."""
+    from ..services.easy4ip_openapi import get_openapi_client, openapi_usage_stats
+
+    cfg = dahua_hero_a1_config()
+    client = get_openapi_client(cfg)
+    app_id = client.app_id if client else str(cfg.get("openapi_app_id") or "")
+    return JSONResponse(openapi_usage_stats(app_id or None))
+
+
+@router.post("/dahua/hero-a1/imou/bind")
+async def imou_bind_camera(
+    body: DahuaTestBody | None = None,
+    current_user: User = Depends(require_admin),
+) -> JSONResponse:
+    """Bind the camera to the CarPro / Imou Open Platform developer app."""
+    from ..services.easy4ip_openapi import ensure_device_bound
+
+    cfg = dahua_hero_a1_config()
+    data = body.model_dump(exclude_unset=True) if body else {}
+    password = data.get("password")
+    if password == "********" or password is None:
+        password = cfg.get("password") or ""
+    password = str(password)
+    if not str(cfg.get("device_serial") or "").strip():
+        raise HTTPException(status_code=400, detail="Enter camera serial (QR) first.")
+    if not password:
+        raise HTTPException(status_code=400, detail="Device password is required to bind the camera to CarPro.")
+    merged = {**cfg, "password": password, "connection_mode": "cloud_hls"}
+    save_camera_config({"dahua_hero_a1": merged})
+    bind = await asyncio.to_thread(ensure_device_bound, merged)
+    if not bind.get("ok"):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": bind.get("error") or "Imou bind failed",
+                "code": bind.get("code"),
+                "hint": (
+                    "Remove the camera from Imou Life / DMSS first, wait ~1 minute, then bind again. "
+                    "If you see OP1013, wait a few minutes — the Imou API rate-limits repeated calls."
+                ),
+            },
+        )
+    return JSONResponse({"ok": True, "bind": bind, "connection_mode": "cloud_hls"})
+
+
+@router.get("/dahua/hero-a1/local-setup/discover")
+async def local_setup_discover(current_user: User = Depends(require_admin)) -> JSONResponse:
+    """Find Dahua cameras on the shop LAN (DMSS-style — backend must be on same network)."""
+    from ..services.dahua_local_wifi import discover_ap_mode_cameras
+
+    return JSONResponse(await asyncio.to_thread(discover_ap_mode_cameras))
+
+
+@router.post("/dahua/hero-a1/local-setup/probe")
+async def local_setup_probe(
+    body: LocalWifiProbeBody,
+    current_user: User = Depends(require_admin),
+) -> JSONResponse:
+    from ..services.dahua_local_wifi import probe_local_camera
+
+    return JSONResponse(
+        await asyncio.to_thread(
+            probe_local_camera,
+            body.host,
+            username=body.username,
+            password=body.password,
+            http_port=body.http_port,
+        )
+    )
+
+
+@router.post("/dahua/hero-a1/local-setup/wifi-scan")
+async def local_setup_wifi_scan(
+    body: LocalWifiProbeBody,
+    current_user: User = Depends(require_admin),
+) -> JSONResponse:
+    from ..services.dahua_local_wifi import scan_local_wlan
+
+    return JSONResponse(
+        await asyncio.to_thread(
+            scan_local_wlan,
+            body.host,
+            username=body.username,
+            password=body.password,
+            http_port=body.http_port,
+        )
+    )
+
+
+@router.post("/dahua/hero-a1/local-setup/wifi-connect")
+async def local_setup_wifi_connect(
+    body: LocalWifiConnectBody,
+    current_user: User = Depends(require_admin),
+) -> JSONResponse:
+    """Send shop Wi-Fi credentials to the camera over local HTTP (like DMSS Soft AP)."""
+    from ..services.dahua_local_wifi import connect_local_wlan
+
+    result = await asyncio.to_thread(
+        connect_local_wlan,
+        body.host,
+        ssid=body.ssid,
+        wifi_password=body.wifi_password,
+        username=body.username,
+        device_password=body.device_password,
+        http_port=body.http_port,
+    )
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail=result)
+    cfg = dahua_hero_a1_config()
+    serial = str(cfg.get("device_serial") or "").strip()
+    merged = {
+        **cfg,
+        "host": body.host,
+        "enabled": True,
+        "connection_mode": cfg.get("connection_mode") or "cartrack_cloud",
+    }
+    if body.device_password:
+        merged["password"] = body.device_password
+    save_camera_config({"dahua_hero_a1": merged})
+    result["saved_host"] = body.host
+    return JSONResponse(result)
 
 
 @router.post("/dahua/hero-a1/cartrack-relay/start")
@@ -669,6 +992,7 @@ def create_camera_endpoint(
         raise HTTPException(status_code=400, detail="Camera name is required.")
     ctype = str(data.get("type") or "rtsp").lower()
     if ctype in ("dahua", "dahua_p2p", "p2p"):
+        _normalize_dahua_serial_fields(data)
         if not str(data.get("device_serial") or "").strip():
             raise HTTPException(status_code=400, detail="Dahua cloud camera requires a device serial (SN from the QR).")
     else:
@@ -679,13 +1003,8 @@ def create_camera_endpoint(
 
     # Cloud HLS cameras (Easy4IP Open Platform) must be bound to our app account
     # before live/PTZ work — bind now using the device password.
-    if cam.get("type") == "dahua_p2p" and _connection_mode(cam) == "cloud_hls":
-        bind = ensure_device_bound(cam)
-        result["bind"] = bind
-        if not bind.get("ok"):
-            # Camera saved, but not streamable yet — surface the reason to the UI.
-            result["provision"] = {"ok": False, "error": bind.get("error", "Cloud bind failed")}
-            return JSONResponse(result, status_code=201)
+    if not _cloud_bind_if_needed(cam, result):
+        return JSONResponse(result, status_code=201)
 
     if connect and cam.get("enabled"):
         result["provision"] = provision_camera(cam["id"])
@@ -710,13 +1029,16 @@ def update_camera_endpoint(
     if not get_camera(camera_id):
         raise HTTPException(status_code=404, detail="Camera not found.")
     patch = sanitize_camera_patch(body.model_dump(exclude_none=True))
+    if str(patch.get("type") or "").lower() in ("dahua", "dahua_p2p", "p2p") or patch.get("device_serial"):
+        _normalize_dahua_serial_fields(patch)
     cam = update_camera(camera_id, patch)
     if not cam:
         raise HTTPException(status_code=404, detail="Camera not found.")
     result: dict[str, Any] = {"camera": _camera_public(cam)}
     if reconnect:
         if cam.get("enabled"):
-            result["provision"] = provision_camera(cam["id"])
+            if _cloud_bind_if_needed(cam, result):
+                result["provision"] = provision_camera(cam["id"])
         else:
             deprovision_camera(cam["id"])
             result["provision"] = {"ok": True, "stopped": True}
